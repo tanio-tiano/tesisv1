@@ -14,14 +14,20 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Ejecuta Walrus Optimizer sobre una funcion CEC 2022."
     )
+    parser.add_argument(
+        "--function",
+        type=str,
+        default=SELECTED_FUNCTION,
+        help="Funcion CEC a ejecutar, por ejemplo F1 o F12.",
+    )
     parser.add_argument("--dim", type=int, default=10, help="Dimensionalidad.")
-    parser.add_argument("--agents", type=int, default=50, help="Tamano de poblacion.")
-    parser.add_argument("--iterations", type=int, default=500, help="Iteraciones.")
+    parser.add_argument("--agents", type=int, default=100, help="Tamano de poblacion.")
+    parser.add_argument("--iterations", type=int, default=2000, help="Iteraciones.")
     parser.add_argument("--seed", type=int, default=1234, help="Semilla aleatoria.")
     parser.add_argument(
         "--output",
         type=str,
-        default="outputs",
+        default="all_functions_outputs_final",
         help="Carpeta donde se guardan curva y grafico.",
     )
     return parser.parse_args()
@@ -45,11 +51,15 @@ def validate_function(function_id):
 
 def save_outputs(output_dir, function_id, convergence_curve):
     output_dir.mkdir(parents=True, exist_ok=True)
+    values_dir = output_dir / "values"
+    graphs_dir = output_dir / "graphs"
+    values_dir.mkdir(parents=True, exist_ok=True)
+    graphs_dir.mkdir(parents=True, exist_ok=True)
 
-    curve_path = output_dir / f"conv_curve_F{function_id}.csv"
+    curve_path = values_dir / f"conv_curve_F{function_id}.csv"
     np.savetxt(curve_path, convergence_curve, delimiter=",", header="best_fitness", comments="")
 
-    figure_path = output_dir / f"conv_curve_F{function_id}.png"
+    figure_path = graphs_dir / f"conv_curve_F{function_id}.png"
     plt.figure(figsize=(9, 5))
     plt.plot(range(1, len(convergence_curve) + 1), convergence_curve, linewidth=2)
     plt.xlabel("Iteraciones")
@@ -65,7 +75,7 @@ def save_outputs(output_dir, function_id, convergence_curve):
 
 def main():
     args = parse_args()
-    function_id = select_function(SELECTED_FUNCTION)
+    function_id = select_function(args.function)
     validate_function(function_id)
     output_dir = Path(args.output)
 

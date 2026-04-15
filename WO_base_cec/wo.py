@@ -9,6 +9,7 @@ def run_wo(search_agents_no, max_iter, lb, ub, dim, objective):
     second_pos = np.zeros(dim)
     best_score = float("inf")
     second_score = float("inf")
+    gbest_x = np.tile(best_pos, (search_agents_no, 1))
 
     positions = initialization(search_agents_no, dim, ub, lb)
     convergence_curve = np.zeros(max_iter)
@@ -24,11 +25,10 @@ def run_wo(search_agents_no, max_iter, lb, ub, dim, objective):
             fitness = objective(positions[i, :])
 
             if fitness < best_score:
-                second_score = best_score
-                second_pos = best_pos.copy()
                 best_score = fitness
                 best_pos = positions[i, :].copy()
-            elif fitness < second_score:
+
+            if fitness > best_score and fitness < second_score:
                 second_score = fitness
                 second_pos = positions[i, :].copy()
 
@@ -38,9 +38,10 @@ def run_wo(search_agents_no, max_iter, lb, ub, dim, objective):
         safety_signal = np.random.rand()
 
         if abs(danger_signal) >= 1:
+            r3 = np.random.rand()
             p1 = np.random.permutation(search_agents_no)
             p2 = np.random.permutation(search_agents_no)
-            positions = positions + (beta * np.random.rand() ** 2) * (
+            positions = positions + (beta * r3**2) * (
                 positions[p1, :] - positions[p2, :]
             )
         else:
@@ -52,32 +53,37 @@ def run_wo(search_agents_no, max_iter, lb, ub, dim, objective):
                 for j in range(male_count, male_count + female_count):
                     positions[j, :] = positions[j, :] + alpha * (
                         positions[last_male_index, :] - positions[j, :]
-                    ) + (1 - alpha) * (best_pos - positions[j, :])
+                    ) + (1 - alpha) * (gbest_x[j, :] - positions[j, :])
 
                 for i in range(search_agents_no - child_count, search_agents_no):
-                    positions[i, :] = np.random.rand() * (
-                        best_pos + positions[i, :] * levy_flight(dim) - positions[i, :]
-                    )
-            else:
-                if abs(danger_signal) >= 0.5:
-                    for i in range(search_agents_no):
-                        positions[i, :] = positions[i, :] * (2 * np.random.rand() - 1) - np.abs(
-                            best_pos - positions[i, :]
-                        ) * (np.random.rand() ** 2)
-                else:
-                    for i in range(search_agents_no):
-                        for j_dim in range(dim):
-                            x1 = best_pos[j_dim] - (
-                                beta * np.random.rand() - beta
-                            ) * np.tan(np.random.rand() * np.pi) * np.abs(
-                                best_pos[j_dim] - positions[i, j_dim]
-                            )
-                            x2 = second_pos[j_dim] - (
-                                beta * np.random.rand() - beta
-                            ) * np.tan(np.random.rand() * np.pi) * np.abs(
-                                second_pos[j_dim] - positions[i, j_dim]
-                            )
-                            positions[i, j_dim] = (x1 + x2) / 2
+                    p = np.random.rand()
+                    o = gbest_x[i, :] + positions[i, :] * levy_flight(dim)
+                    positions[i, :] = p * (o - positions[i, :])
+
+            if safety_signal < 0.5 and abs(danger_signal) >= 0.5:
+                for i in range(search_agents_no):
+                    r4 = np.random.rand()
+                    positions[i, :] = positions[i, :] * danger_signal - np.abs(
+                        gbest_x[i, :] - positions[i, :]
+                    ) * r4**2
+
+            if safety_signal < 0.5 and abs(danger_signal) < 0.5:
+                for i in range(search_agents_no):
+                    for j_dim in range(dim):
+                        theta1 = np.random.rand()
+                        a1 = beta * np.random.rand() - beta
+                        b1 = np.tan(theta1 * np.pi)
+                        x1 = best_pos[j_dim] - a1 * b1 * abs(
+                            best_pos[j_dim] - positions[i, j_dim]
+                        )
+
+                        theta2 = np.random.rand()
+                        a2 = beta * np.random.rand() - beta
+                        b2 = np.tan(theta2 * np.pi)
+                        x2 = second_pos[j_dim] - a2 * b2 * abs(
+                            second_pos[j_dim] - positions[i, j_dim]
+                        )
+                        positions[i, j_dim] = (x1 + x2) / 2
 
         convergence_curve[iteration] = best_score
 
