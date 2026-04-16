@@ -34,6 +34,7 @@ CONTROLLER_SENSITIVITY_PRESETS = {
         "late_intervention_fraction": 0.84,
         "max_interventions": 6,
         "minimum_stagnation_scale": 1.20,
+        "default_runs": None,
         "max_shap_episodes": None,
         "description": "Controlador relajado: ventana grande, intervenciones menos frecuentes.",
     },
@@ -45,6 +46,7 @@ CONTROLLER_SENSITIVITY_PRESETS = {
         "late_intervention_fraction": 0.92,
         "max_interventions": 8,
         "minimum_stagnation_scale": 0.95,
+        "default_runs": 10,
         "max_shap_episodes": None,
         "description": "Controlador estándar: valores default.",
     },
@@ -56,6 +58,7 @@ CONTROLLER_SENSITIVITY_PRESETS = {
         "late_intervention_fraction": 0.95,
         "max_interventions": 10,
         "minimum_stagnation_scale": 0.70,
+        "default_runs": 10,
         "max_shap_episodes": None,
         "description": "Controlador agresivo: ventana pequeña, intervenciones más frecuentes.",
     },
@@ -193,6 +196,13 @@ def resolve_controller_sensitivity(args):
         preset["max_shap_episodes"] = int(args.max_shap_episodes)
     preset["controller_sensitivity"] = sensitivity
     return preset
+
+
+def resolve_instance_runs(args, sensitivity):
+    preset_runs = CONTROLLER_SENSITIVITY_PRESETS[sensitivity].get("default_runs")
+    if preset_runs is None:
+        return int(args.runs)
+    return int(preset_runs)
 
 
 def build_controller(args):
@@ -572,12 +582,12 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    num_runs = int(args.runs)
     suite_rows = []
     global_rows = []
 
     for sensitivity in sensitivities:
         args.controller_sensitivity = sensitivity
+        instance_runs = resolve_instance_runs(args, sensitivity)
         instance_dir = output_dir / sensitivity
         values_dir = instance_dir / "values"
         graphs_dir = instance_dir / "graphs"
@@ -588,11 +598,12 @@ def main():
         print(f"INSTANCIA {sensitivity.upper()}")
         print(f"{'='*80}")
         print(CONTROLLER_SENSITIVITY_PRESETS[sensitivity]["description"])
+        print(f"Corridas configuradas para esta instancia: {instance_runs}")
 
         all_rows = []
-        for run_id in range(1, num_runs + 1):
+        for run_id in range(1, instance_runs + 1):
             print(f"\n{'-'*80}")
-            print(f"CORRIDA {run_id}/{num_runs}")
+            print(f"CORRIDA {run_id}/{instance_runs}")
             print(f"{'-'*80}\n")
 
             rows = []
@@ -636,10 +647,10 @@ def main():
         comparison_path = values_dir / f"comparison_wo_shap_cec2022_{sensitivity}_all_runs.csv"
         comparison_df.to_csv(comparison_path, index=False)
 
-        consolidated_files = consolidate_logs(values_dir, num_runs, cases)
+        consolidated_files = consolidate_logs(values_dir, instance_runs, cases)
         global_consolidated_path = consolidate_all_runs(
             values_dir,
-            num_runs,
+            instance_runs,
             cases,
             sensitivity=sensitivity,
         )
