@@ -45,5 +45,6 @@ Metodologia implementada:
 - Nucleo WO alineado con la version base estilo MATLAB-literal.
 - Deteccion de estancamiento por no mejora consecutiva.
 - Diagnostico por diversidad poblacional normalizada.
-- Acciones reactivas: `adjust_alpha_beta`, `partial_restart`, `random_reinjection`.
+- Intervenciones del controlador reportadas como `rescate`.
+- Estrategias internas de rescate: `partial_restart` y `random_reinjection`.
 - SHAP/Shapley exacto explica el fitness usando variables internas escalares del WO, incluyendo `diversity` y `diversity_norm`, sin usar `pop_size` como feature.

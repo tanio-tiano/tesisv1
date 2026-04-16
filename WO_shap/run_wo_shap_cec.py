@@ -203,7 +203,9 @@ def main():
             pass
     print(f"Activaciones del controlador: {event_summary['event_count']}")
     if event_summary["actions"]:
-        print(f"Resumen por accion: {event_summary['actions']}")
+        print(f"Resumen por rescate: {event_summary['actions']}")
+    if event_summary.get("action_kinds"):
+        print(f"Resumen por estrategia interna: {event_summary['action_kinds']}")
     if event_summary["stagnation_states"]:
         print(f"Resumen por estado de estancamiento: {event_summary['stagnation_states']}")
     print(f"Episodios de estancamiento registrados: {event_summary['episode_count']}")

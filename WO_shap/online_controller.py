@@ -63,6 +63,7 @@ class OnlineXAIController:
         self.action_cooldown = int(profile_config["action_cooldown"])
         self.late_intervention_fraction = float(profile_config["late_intervention_fraction"])
         self.effective_action_cooldown = int(profile_config["effective_action_cooldown"])
+        self.post_effective_guard_window = int(profile_config["post_effective_guard_window"])
         self.max_interventions = int(profile_config["max_interventions"])
         self.minimum_stagnation_scale = float(profile_config["minimum_stagnation_scale"])
         self.max_shap_episodes = None if max_shap_episodes is None else int(max_shap_episodes)
@@ -228,6 +229,7 @@ class OnlineXAIController:
             "event_active": int(plan_data["action"]["event_active"]),
             "control_mode": str(plan_data["action"]["mode"]),
             "action_taken": str(plan_data["action"]["action_taken"]),
+            "action_kind": str(plan_data["action"]["action_kind"]),
             "action_justification": str(plan_data["action"]["justification"]),
             "alpha_scale": float(plan_data["action"]["alpha_scale"]),
             "beta_scale": float(plan_data["action"]["beta_scale"]),
@@ -268,6 +270,7 @@ class OnlineXAIController:
                 "event_active": record["event_active"],
                 "control_mode": record["control_mode"],
                 "action_taken": record["action_taken"],
+                "action_kind": record["action_kind"],
                 "action_justification": record["action_justification"],
                 "alpha_scale": record["alpha_scale"],
                 "beta_scale": record["beta_scale"],
@@ -316,6 +319,7 @@ class OnlineXAIController:
                     ),
                     "stagnation_state": record["stagnation_state"],
                     "action_taken": record["action_taken"],
+                    "action_kind": record["action_kind"],
                     "action_justification": record["action_justification"],
                     "stagnation": int(record["stagnation"]),
                     "stagnation_length": record["stagnation_length"],
@@ -447,6 +451,7 @@ class OnlineXAIController:
             "t_post",
             "stagnation_state",
             "action_taken",
+            "action_kind",
             "action_justification",
             "stagnation",
             "stagnation_length",
@@ -501,6 +506,7 @@ class OnlineXAIController:
                 "event_count": 0,
                 "episode_count": 0,
                 "actions": {},
+                "action_kinds": {},
                 "stagnation_states": {},
                 "effects": {},
                 "sensitivity_profile": self.sensitivity_profile,
@@ -510,6 +516,7 @@ class OnlineXAIController:
             "event_count": int(len(event_df)),
             "episode_count": int(len(self.episode_log)),
             "actions": event_df["action_taken"].value_counts().to_dict(),
+            "action_kinds": event_df["action_kind"].value_counts().to_dict(),
             "stagnation_states": event_df["stagnation_state"].value_counts().to_dict(),
             "effects": event_df["effect_label"].value_counts().to_dict(),
             "sensitivity_profile": self.sensitivity_profile,
@@ -528,31 +535,34 @@ class OnlineXAIController:
         presets = {
             "soft": {
                 "delta_window": 60,
-                "action_cooldown": 85,
-                "late_intervention_fraction": 0.82,
-                "effective_action_cooldown": 120,
-                "max_interventions": 3,
-                "minimum_stagnation_scale": 1.25,
+                "action_cooldown": 78,
+                "late_intervention_fraction": 0.84,
+                "effective_action_cooldown": 105,
+                "post_effective_guard_window": 180,
+                "max_interventions": 6,
+                "minimum_stagnation_scale": 1.18,
             },
             "medium": {
                 "delta_window": int(delta_window),
-                "action_cooldown": int(action_cooldown),
-                "late_intervention_fraction": float(late_intervention_fraction),
+                "action_cooldown": 32,
+                "late_intervention_fraction": 0.92,
                 "effective_action_cooldown": (
                     int(effective_action_cooldown)
                     if effective_action_cooldown is not None
-                    else max(70, int(action_cooldown) + 20)
+                    else 60
                 ),
-                "max_interventions": 5 if max_interventions is None else int(max_interventions),
-                "minimum_stagnation_scale": 1.00,
+                "post_effective_guard_window": 130,
+                "max_interventions": 8 if max_interventions is None else int(max_interventions),
+                "minimum_stagnation_scale": 0.95,
             },
             "hard": {
-                "delta_window": 40,
-                "action_cooldown": 55,
-                "late_intervention_fraction": 0.90,
-                "effective_action_cooldown": 75,
-                "max_interventions": 7,
-                "minimum_stagnation_scale": 0.85,
+                "delta_window": 38,
+                "action_cooldown": 22,
+                "late_intervention_fraction": 0.95,
+                "effective_action_cooldown": 42,
+                "post_effective_guard_window": 90,
+                "max_interventions": 10,
+                "minimum_stagnation_scale": 0.72,
             },
         }
         if profile_name not in presets:
@@ -751,26 +761,28 @@ class OnlineXAIController:
         beta_scale = 1.0
         rescue_fraction = 0.0 if rescue_fraction is None else float(rescue_fraction)
         rescue_mode = "none" if rescue_mode is None else str(rescue_mode)
+        action_kind = str(action_taken)
 
-        if action_taken == "partial_restart":
+        if action_kind == "partial_restart":
             if rescue_mode == "none":
                 rescue_fraction = self.partial_restart_fraction
                 rescue_mode = "elite_guided"
-        elif action_taken == "random_reinjection":
+        elif action_kind == "random_reinjection":
             if rescue_mode == "none":
                 rescue_fraction = self.random_reinjection_fraction
                 rescue_mode = "random"
 
-        event_active = action_taken != "none"
+        event_active = action_kind != "none"
         return {
             "event_active": event_active,
             "mode": "intervene" if event_active else "baseline",
-            "action_taken": action_taken,
+            "action_taken": "rescate" if event_active else "none",
+            "action_kind": action_kind,
             "alpha_scale": float(alpha_scale),
             "beta_scale": float(beta_scale),
             "rescue_fraction": float(rescue_fraction),
             "rescue_mode": rescue_mode,
-            "justification": self._action_justification(action_taken, rescue_mode),
+            "justification": self._action_justification(action_kind, rescue_mode),
         }
 
     def _empty_decision_shap(self):
@@ -789,7 +801,7 @@ class OnlineXAIController:
         return int(max(60, 2 * int(self.delta_window)))
 
     def _post_effective_guard_window(self):
-        return int(max(160, 3 * int(self.delta_window)))
+        return int(self.post_effective_guard_window)
 
     def _update_runtime_feedback(self, iteration, current_fitness):
         if not self.pending_feedback_events:
@@ -875,16 +887,16 @@ class OnlineXAIController:
 
         if harmful_feature in {"diversity", "diversity_norm"}:
             adjusted["rescue_fraction"] = float(adjusted["rescue_fraction"]) * 1.10
-            if adjusted["action_taken"] == "partial_restart":
+            if adjusted["action_kind"] == "partial_restart":
                 adjusted["rescue_mode"] = "elite_guided_wide"
             decision_shap["policy"] = "reinforce_diversity_signal"
         elif harmful_feature in {"danger_signal", "safety_signal"}:
-            if adjusted["action_taken"] == "partial_restart":
+            if adjusted["action_kind"] == "partial_restart":
                 adjusted["rescue_mode"] = "elite_guided"
             decision_shap["policy"] = "respect_regime_signal"
         elif harmful_feature in {"alpha", "beta", "iteration"}:
             adjusted["rescue_fraction"] = float(adjusted["rescue_fraction"]) * 0.85
-            if adjusted["action_taken"] == "partial_restart" and adjusted["rescue_mode"] == "elite_guided_wide":
+            if adjusted["action_kind"] == "partial_restart" and adjusted["rescue_mode"] == "elite_guided_wide":
                 adjusted["rescue_mode"] = "elite_guided"
             decision_shap["policy"] = "attenuate_schedule_signal"
         else:
@@ -897,17 +909,17 @@ class OnlineXAIController:
         )
         return adjusted
 
-    def _action_justification(self, action_taken, rescue_mode):
-        if action_taken == "partial_restart":
+    def _action_justification(self, action_kind, rescue_mode):
+        if action_kind == "partial_restart":
             if rescue_mode == "elite_guided_wide":
-                return "Estancamiento con diversidad alta; se recoloca la cola poblacional alrededor de los lideres con perturbacion amplia."
+                return "Rescate por estancamiento con diversidad alta; se recoloca la cola poblacional alrededor de los lideres con perturbacion amplia."
             if rescue_mode == "elite_guided_aggressive":
-                return "Estancamiento persistente; se recoloca una fraccion mayor de la cola poblacional alrededor de los lideres con perturbacion reforzada."
-            return "Estancamiento detectado; se recoloca parcialmente la cola poblacional alrededor de best_pos y second_pos."
-        if action_taken == "random_reinjection":
+                return "Rescate por estancamiento persistente; se recoloca una fraccion mayor de la cola poblacional alrededor de los lideres con perturbacion reforzada."
+            return "Rescate por estancamiento detectado; se recoloca parcialmente la cola poblacional alrededor de best_pos y second_pos."
+        if action_kind == "random_reinjection":
             if rescue_mode == "random_aggressive":
-                return "Estancamiento severo con diversidad baja; se reinyecta una fraccion mayor de poblacion aleatoria."
-            return "Estancamiento con diversidad baja; se reinyecta poblacion aleatoria sin reinicio total."
+                return "Rescate por estancamiento severo con diversidad baja; se reinyecta una fraccion mayor de poblacion aleatoria."
+            return "Rescate por estancamiento con diversidad baja; se reinyecta poblacion aleatoria sin reinicio total."
         return "Sin intervencion."
 
     def _adaptive_rescue_fraction(self, base_fraction, stagnation_length, cap):
