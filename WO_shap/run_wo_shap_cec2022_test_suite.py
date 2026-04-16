@@ -83,6 +83,12 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=1234, help="Semilla base reproducible.")
     parser.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help="Numero de corridas independientes a ejecutar (default: 1).",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="test_suite_outputs_cec2022",
@@ -127,18 +133,25 @@ def validate_configuration(cases, dim):
             )
 
 
-def save_curve(values_dir, function_id, convergence_curve):
-    curve_path = values_dir / f"conv_curve_shap_F{function_id}.csv"
+def save_curve(values_dir, function_id, convergence_curve, run_id=None):
+    if run_id is not None:
+        curve_path = values_dir / f"conv_curve_shap_F{function_id}_run{run_id}.csv"
+    else:
+        curve_path = values_dir / f"conv_curve_shap_F{function_id}.csv"
     np.savetxt(curve_path, convergence_curve, delimiter=",", header="best_fitness", comments="")
     return curve_path
 
 
-def save_case_result(values_dir, case, problem, args, seed, best_score, best_pos, controller):
+def save_case_result(values_dir, case, problem, args, seed, best_score, best_pos, controller, run_id=None):
     optimum = float(getattr(problem, "f_global", np.nan))
     event_summary = controller.event_summary()
     metadata = FUNCTION_METADATA[case["function_id"]]
-    result_path = values_dir / f"result_wo_shap_{case['difficulty']}_F{case['function_id']}.csv"
+    if run_id is not None:
+        result_path = values_dir / f"result_wo_shap_{case['difficulty']}_F{case['function_id']}_run{run_id}.csv"
+    else:
+        result_path = values_dir / f"result_wo_shap_{case['difficulty']}_F{case['function_id']}.csv"
     row = {
+        "run_id": int(run_id) if run_id is not None else 1,
         "benchmark": "cec2022",
         "difficulty": case["difficulty"],
         "difficulty_rationale": case["rationale"],
@@ -164,8 +177,8 @@ def save_case_result(values_dir, case, problem, args, seed, best_score, best_pos
     return row
 
 
-def run_case(case, args, values_dir):
-    seed = int(args.seed + case["function_id"] - 1)
+def run_case(case, args, values_dir, run_id=None):
+    seed = int(args.seed + case["function_id"] - 1 + (run_id - 1) * 1000 if run_id else args.seed + case["function_id"] - 1)
     np.random.seed(seed)
     problem = CECProblem(case["function_id"], args.dim)
     controller = OnlineXAIController(
@@ -181,11 +194,159 @@ def run_case(case, args, values_dir):
         problem.evaluate,
         controller,
     )
-    curve_path = save_curve(values_dir, case["function_id"], convergence_curve)
-    controller.save_logs(values_dir, case["function_id"])
-    row = save_case_result(values_dir, case, problem, args, seed, best_score, best_pos, controller)
+    curve_path = save_curve(values_dir, case["function_id"], convergence_curve, run_id)
+    
+    # Crear carpeta de logs por corrida si hay múltiples ejecuciones
+    if run_id is not None and run_id > 1:
+        logs_dir = values_dir / f"run{run_id}_logs"
+        logs_dir.mkdir(exist_ok=True)
+        controller.save_logs(logs_dir, case["function_id"])
+    else:
+        controller.save_logs(values_dir, case["function_id"])
+    
+    row = save_case_result(values_dir, case, problem, args, seed, best_score, best_pos, controller, run_id)
     row["curve_csv"] = str(curve_path)
     return row
+
+
+def consolidate_logs(values_dir, num_runs, cases):
+    """Consolida los logs de cada corrida en su propio archivo único."""
+    
+    consolidated_files = {}
+    
+    for run_id in range(1, num_runs + 1):
+        run_consolidated = []
+        
+        for case in cases:
+            fid = case["function_id"]
+            
+            # Determinar carpeta de logs
+            if run_id == 1:
+                logs_dir = values_dir
+            else:
+                logs_dir = values_dir / f"run{run_id}_logs"
+            
+            # Cargar state
+            state_file = logs_dir / f"controller_state_F{fid}.csv"
+            if not state_file.exists():
+                continue
+            
+            state_df = pd.read_csv(state_file)
+            state_df["run_id"] = run_id
+            state_df["function_id"] = fid
+            
+            # Cargar events
+            events_file = logs_dir / f"controller_events_F{fid}.csv"
+            events_df = pd.read_csv(events_file) if events_file.exists() else pd.DataFrame()
+            if not events_df.empty:
+                events_df["run_id"] = run_id
+                events_df["function_id"] = fid
+            
+            # Cargar shap_values
+            shap_file = logs_dir / f"shap_values_F{fid}.csv"
+            shap_df = pd.read_csv(shap_file) if shap_file.exists() else pd.DataFrame()
+            if not shap_df.empty:
+                shap_df["run_id"] = run_id
+                shap_df["function_id"] = fid
+            
+            # Cargar episodes
+            episodes_file = logs_dir / f"controller_episodes_F{fid}.csv"
+            episodes_df = pd.read_csv(episodes_file) if episodes_file.exists() else pd.DataFrame()
+            if not episodes_df.empty:
+                episodes_df["run_id"] = run_id
+                episodes_df["function_id"] = fid
+            
+            # Cargar convergence curves
+            curve_file = values_dir / f"conv_curve_shap_F{fid}_run{run_id}.csv"
+            if curve_file.exists():
+                curve_data = np.loadtxt(curve_file, delimiter=",")
+                if curve_data.ndim == 1:
+                    curve_data = curve_data.reshape(-1, 1)
+                curves_dict = {
+                    int(iteration): float(fitness[0])
+                    for iteration, fitness in enumerate(curve_data)
+                }
+                state_df["best_fitness_curve"] = state_df["iteration"].map(curves_dict)
+            
+            # Mergear events a state (left merge por event_id)
+            if not events_df.empty:
+                # Seleccionar columnas relevantes de events
+                events_cols = [col for col in events_df.columns 
+                             if col not in ["run_id", "function_id"]]
+                state_df = state_df.merge(
+                    events_df[events_cols],
+                    on="event_id",
+                    how="left",
+                    suffixes=("", "_event")
+                )
+            
+            # Mergear shap a state (left merge por event_id y phase si existe)
+            if not shap_df.empty:
+                shap_cols = [col for col in shap_df.columns 
+                           if col not in ["run_id", "function_id"] and col.startswith("SHAP_")]
+                if "phase" in shap_df.columns:
+                    # Para cada row, tomar pre-shap
+                    shap_pre = shap_df[shap_df["phase"] == "pre"].copy()
+                    shap_pre_cols = [col for col in shap_pre.columns 
+                                   if col.startswith("SHAP_")]
+                    for col in shap_pre_cols:
+                        shap_pre = shap_pre.rename(columns={col: f"{col}_pre"})
+                    state_df = state_df.merge(
+                        shap_pre[["event_id", "run_id", "function_id"] + 
+                                [f"{col}_pre" for col in shap_pre_cols]],
+                        on=["event_id", "run_id", "function_id"],
+                        how="left"
+                    )
+                else:
+                    state_df = state_df.merge(
+                        shap_df[["event_id", "run_id", "function_id"] + shap_cols],
+                        on=["event_id", "run_id", "function_id"],
+                        how="left"
+                    )
+            
+            # Mergear episodes a state (left merge por episode_id si existe)
+            if not episodes_df.empty and "episode_id" in state_df.columns:
+                episode_cols = [col for col in episodes_df.columns 
+                              if col not in ["run_id", "function_id"]]
+                state_df = state_df.merge(
+                    episodes_df[episode_cols],
+                    on="episode_id",
+                    how="left"
+                )
+            
+            run_consolidated.append(state_df)
+        
+        # Guardar archivo para esta corrida
+        if run_consolidated:
+            run_df = pd.concat(run_consolidated, ignore_index=True)
+            
+            # Reorganizar columnas para mejor legibilidad
+            core_cols = ["run_id", "function_id", "iteration", "event_id", "episode_id"]
+            state_cols = ["alpha", "beta", "danger_signal", "safety_signal", 
+                         "diversity", "diversity_norm", "stagnation", "stagnation_length"]
+            event_cols = [col for col in run_df.columns 
+                         if col.startswith("event_") or col in ["action_taken", "action_kind", 
+                                                                 "rescue_fraction", "rescue_mode"]]
+            shap_cols = [col for col in run_df.columns if col.startswith("SHAP_")]
+            episode_cols = [col for col in run_df.columns 
+                           if col.startswith("episode_") or col in ["start_iteration", "end_iteration"]]
+            curve_cols = ["best_fitness_curve"]
+            other_cols = [col for col in run_df.columns 
+                         if col not in (core_cols + state_cols + event_cols + 
+                                       shap_cols + episode_cols + curve_cols)]
+            
+            # Reordenar
+            final_cols = (core_cols + state_cols + curve_cols + event_cols + 
+                         shap_cols + episode_cols + other_cols)
+            final_cols = [col for col in final_cols if col in run_df.columns]
+            
+            run_df = run_df[final_cols]
+            
+            consolidated_path = values_dir / f"consolidated_run{run_id}_all_functions.csv"
+            run_df.to_csv(consolidated_path, index=False)
+            consolidated_files[f"run{run_id}"] = consolidated_path
+    
+    return consolidated_files
 
 
 def build_cases(args):
@@ -219,26 +380,69 @@ def main():
     values_dir.mkdir(parents=True, exist_ok=True)
     graphs_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = []
-    for case in cases:
-        metadata = FUNCTION_METADATA[case["function_id"]]
-        print(
-            f"Ejecutando caso {case['difficulty']} -> F{case['function_id']} "
-            f"({metadata['name']}, {metadata['family']})"
-        )
-        row = run_case(case, args, values_dir)
-        rows.append(row)
-        print(
-            f"  final={row['final_fitness']:.12f}, optimum={row['optimum']:.12f}, "
-            f"gap={row['gap_to_optimum']:.12f}, eventos={row['event_count']}, episodios={row['episode_count']}"
-        )
+    all_rows = []
+    num_runs = int(args.runs)
+    
+    for run_id in range(1, num_runs + 1):
+        print(f"\n{'='*80}")
+        print(f"CORRIDA {run_id}/{num_runs}")
+        print(f"{'='*80}\n")
+        
+        rows = []
+        for case in cases:
+            metadata = FUNCTION_METADATA[case["function_id"]]
+            print(
+                f"Ejecutando caso {case['difficulty']} -> F{case['function_id']} "
+                f"({metadata['name']}, {metadata['family']})"
+            )
+            row = run_case(case, args, values_dir, run_id)
+            rows.append(row)
+            print(
+                f"  final={row['final_fitness']:.12f}, optimum={row['optimum']:.12f}, "
+                f"gap={row['gap_to_optimum']:.12f}, eventos={row['event_count']}, episodios={row['episode_count']}"
+            )
+        
+        all_rows.extend(rows)
 
-    summary_df = pd.DataFrame(rows)
-    summary_path = values_dir / "summary_wo_shap_cec2022_difficulty_suite.csv"
+    # Guardar resumen por corrida
+    summary_df = pd.DataFrame(all_rows)
+    summary_path = values_dir / "summary_wo_shap_cec2022_all_runs.csv"
     summary_df.to_csv(summary_path, index=False)
+
+    # Guardar estadísticas agregadas por función y dificultad
+    if num_runs > 1:
+        stats_rows = []
+        for case in cases:
+            case_data = summary_df[
+                (summary_df["function_id"] == case["function_id"]) &
+                (summary_df["difficulty"] == case["difficulty"])
+            ]
+            if len(case_data) > 0:
+                stats_rows.append({
+                    "function": f"F{case['function_id']}",
+                    "function_id": case["function_id"],
+                    "difficulty": case["difficulty"],
+                    "function_name": case_data["function_name"].iloc[0],
+                    "function_family": case_data["function_family"].iloc[0],
+                    "runs": len(case_data),
+                    "final_fitness_mean": float(case_data["final_fitness"].mean()),
+                    "final_fitness_std": float(case_data["final_fitness"].std()),
+                    "final_fitness_min": float(case_data["final_fitness"].min()),
+                    "final_fitness_max": float(case_data["final_fitness"].max()),
+                    "gap_to_optimum_mean": float(case_data["gap_to_optimum"].mean()),
+                    "gap_to_optimum_std": float(case_data["gap_to_optimum"].std()),
+                    "event_count_mean": float(case_data["event_count"].mean()),
+                    "event_count_std": float(case_data["event_count"].std()),
+                })
+        
+        stats_df = pd.DataFrame(stats_rows)
+        stats_path = values_dir / "statistics_wo_shap_cec2022_aggregated.csv"
+        stats_df.to_csv(stats_path, index=False)
+        print(f"\nEstadísticas agregadas: {stats_path}")
 
     comparison_df = summary_df[
         [
+            "run_id",
             "difficulty",
             "function",
             "function_name",
@@ -251,15 +455,28 @@ def main():
             "status",
         ]
     ].copy()
-    comparison_path = values_dir / "comparison_wo_shap_cec2022_difficulty_suite.csv"
+    comparison_path = values_dir / "comparison_wo_shap_cec2022_all_runs.csv"
     comparison_df.to_csv(comparison_path, index=False)
 
+    # Consolidar todos los logs de todas las corridas
+    consolidated_files = consolidate_logs(values_dir, num_runs, cases)
+    
     monitor_path = create_all_functions_monitor(values_dir, graphs_dir)
 
-    print(f"Resumen de la suite: {summary_path}")
-    print(f"Comparacion de la suite: {comparison_path}")
+    print(f"\n{'='*80}")
+    print(f"RESUMEN FINAL - {num_runs} CORRIDA(S) COMPLETADA(S)")
+    print(f"{'='*80}")
+    print(f"Resumen completo: {summary_path}")
+    print(f"Comparacion: {comparison_path}")
+    if num_runs > 1:
+        print(f"Estadísticas agregadas: {stats_path}")
+    
+    print(f"\nARCHIVOS CONSOLIDADOS:")
+    for log_type, filepath in consolidated_files.items():
+        print(f"  - {log_type}: {filepath}")
+    
     if monitor_path is not None:
-        print(f"Panel interactivo: {monitor_path}")
+        print(f"\nPanel interactivo: {monitor_path}")
 
 
 if __name__ == "__main__":
