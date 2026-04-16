@@ -1,0 +1,1 @@
+event_id,phase,iteration,t_pre,t_post,event_active,shap_reason,selected_output,BASE_fitness,OUTPUT_fitness,OBSERVED_fitness,stagnation_state,action_taken,dominant_feature,SHAP_alpha,SHAP_beta,SHAP_danger_signal,SHAP_safety_signal,SHAP_diversity,SHAP_diversity_norm,SHAP_iteration

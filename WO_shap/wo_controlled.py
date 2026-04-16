@@ -46,12 +46,17 @@ def _apply_diversity_rescue(
         return positions, 0
 
     positions = positions.copy()
+    dim = positions.shape[1]
+    lb_arr = np.full(dim, lb, dtype=float) if np.isscalar(lb) else np.asarray(lb, dtype=float)
+    ub_arr = np.full(dim, ub, dtype=float) if np.isscalar(ub) else np.asarray(ub, dtype=float)
+    span = np.maximum(ub_arr - lb_arr, 1e-12)
     protected = {int(np.argmin(fitness_values))}
     if len(fitness_values) > 1:
         protected.add(int(np.argsort(fitness_values)[1]))
 
     available = [idx for idx in range(len(fitness_values)) if idx not in protected]
-    if rescue_mode == "random" and available:
+    elite_pool = [int(idx) for idx in np.argsort(fitness_values)[: max(3, len(fitness_values) // 3)]]
+    if rescue_mode in {"random", "random_aggressive"} and available:
         replace_count = min(rescued_agents, len(available))
         candidate_indices = np.random.choice(available, size=replace_count, replace=False)
     else:
@@ -60,9 +65,27 @@ def _apply_diversity_rescue(
         ]
 
     rescued = 0
+    second_anchor = second_pos.copy()
+    if not np.any(np.abs(second_anchor) > 0):
+        second_anchor = best_pos.copy()
     for idx in candidate_indices:
         idx = int(idx)
-        positions[idx, :] = np.random.rand(positions.shape[1]) * (ub - lb) + lb
+        if rescue_mode in {"random", "random_aggressive"}:
+            positions[idx, :] = np.random.rand(dim) * span + lb_arr
+        else:
+            peer_idx = int(np.random.choice(elite_pool))
+            peer = positions[peer_idx, :].copy()
+            if rescue_mode == "elite_guided_aggressive":
+                anchor = 0.50 * best_pos + 0.20 * second_anchor + 0.30 * peer
+                noise_scale = 0.14
+            elif rescue_mode == "elite_guided_wide":
+                anchor = 0.55 * best_pos + 0.20 * second_anchor + 0.25 * peer
+                noise_scale = 0.10
+            else:
+                anchor = 0.72 * best_pos + 0.18 * second_anchor + 0.10 * peer
+                noise_scale = 0.06
+            noise = np.random.randn(dim) * noise_scale * span
+            positions[idx, :] = np.clip(anchor + noise, lb_arr, ub_arr)
         rescued += 1
         if rescued >= rescued_agents:
             break
@@ -128,7 +151,6 @@ def run_wo_controlled(search_agents_no, max_iter, lb, ub, dim, objective, contro
                 "beta": float(base_beta),
                 "danger_signal": float(base_danger_signal),
                 "safety_signal": float(base_safety_signal),
-                "pop_size": float(search_agents_no),
                 "positions_context": positions.copy(),
                 "best_score_context": float(best_score),
                 "best_pos_context": best_pos.copy(),

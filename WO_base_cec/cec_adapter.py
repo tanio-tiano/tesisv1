@@ -1,21 +1,9 @@
-import numpy as np
-from opfunu.cec_based import cec2022
+import sys
+from pathlib import Path
 
 
-class CECProblem:
-    def __init__(self, function_id, dim=10):
-        self.problem = getattr(cec2022, f"F{function_id}2022")(ndim=dim)
-        self.lb = (
-            self.problem.lb[0]
-            if np.all(self.problem.lb == self.problem.lb[0])
-            else self.problem.lb
-        )
-        self.ub = (
-            self.problem.ub[0]
-            if np.all(self.problem.ub == self.problem.ub[0])
-            else self.problem.ub
-        )
-        self.dim = dim
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-    def evaluate(self, x):
-        return self.problem.evaluate(x)
+from cec2022_official import OfficialCEC2022Problem as CECProblem

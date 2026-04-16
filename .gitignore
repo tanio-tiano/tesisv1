@@ -11,9 +11,6 @@ Thumbs.db
 **/test_outputs/
 **/all_functions_outputs/
 
-*.csv
-*.png
-
 !*.md
 !*.pdf
 !*.py

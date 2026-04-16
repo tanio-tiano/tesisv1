@@ -3,6 +3,7 @@ from pathlib import Path
 import webbrowser
 
 import numpy as np
+import pandas as pd
 
 from cec_adapter import CECProblem
 from online_controller import OnlineXAIController
@@ -23,13 +24,19 @@ def parse_args():
         help="Funcion CEC a ejecutar, por ejemplo F1 o F12.",
     )
     parser.add_argument("--dim", type=int, default=10, help="Dimensionalidad.")
-    parser.add_argument("--agents", type=int, default=50, help="Tamano de poblacion.")
+    parser.add_argument("--agents", type=int, default=30, help="Tamano de poblacion.")
     parser.add_argument("--iterations", type=int, default=500, help="Iteraciones.")
     parser.add_argument(
         "--delta-window",
         type=int,
         default=50,
         help="Ventana para calcular delta fitness y detectar estancamiento.",
+    )
+    parser.add_argument(
+        "--max-shap-episodes",
+        type=int,
+        default=None,
+        help="Numero maximo de episodios severos seleccionados para calcular SHAP. Si se omite, no hay limite.",
     )
     parser.add_argument("--seed", type=int, default=1234, help="Semilla aleatoria.")
     parser.add_argument(
@@ -72,6 +79,38 @@ def save_outputs(output_dir, function_id, convergence_curve, controller):
     return curve_path, monitor_path
 
 
+def problem_optimum(problem):
+    return float(getattr(problem, "f_global", np.nan))
+
+
+def save_result_summary(output_dir, function_id, problem, agents, iterations, seed, best_score, best_pos, controller):
+    values_dir = output_dir / "values"
+    values_dir.mkdir(parents=True, exist_ok=True)
+    optimum = problem_optimum(problem)
+    event_summary = controller.event_summary()
+    summary_path = values_dir / f"result_wo_shap_F{function_id}.csv"
+    pd.DataFrame(
+        [
+            {
+                "benchmark": "cec2022",
+                "function": f"F{function_id}",
+                "function_id": int(function_id),
+                "dim": int(problem.dim),
+                "agents": int(agents),
+                "iterations": int(iterations),
+                "seed": int(seed),
+                "final_fitness": float(best_score),
+                "optimum": optimum,
+                "gap_to_optimum": float(best_score - optimum) if not pd.isna(optimum) else np.nan,
+                "event_count": int(event_summary["event_count"]),
+                "episode_count": int(event_summary["episode_count"]),
+                "best_position": " ".join(f"{value:.12g}" for value in best_pos),
+            }
+        ]
+    ).to_csv(summary_path, index=False)
+    return summary_path, optimum
+
+
 def main():
     args = parse_args()
     function_id = select_function(args.function)
@@ -82,7 +121,10 @@ def main():
 
     np.random.seed(args.seed)
     problem = CECProblem(function_id, args.dim)
-    controller = OnlineXAIController(delta_window=args.delta_window)
+    controller = OnlineXAIController(
+        delta_window=args.delta_window,
+        max_shap_episodes=args.max_shap_episodes,
+    )
 
     best_score, best_pos, convergence_curve = run_wo_controlled(
         args.agents,
@@ -98,12 +140,27 @@ def main():
         output_dir, function_id, convergence_curve, controller
     )
     event_summary = controller.event_summary()
+    summary_path, optimum = save_result_summary(
+        output_dir,
+        function_id,
+        problem,
+        args.agents,
+        args.iterations,
+        args.seed,
+        best_score,
+        best_pos,
+        controller,
+    )
 
     print("Ejecucion finalizada.")
     print(f"Funcion evaluada: F{function_id}")
     print(f"Mejor fitness encontrado: {best_score}")
+    if not pd.isna(optimum):
+        print(f"Optimo de referencia: {optimum}")
+        print(f"Gap al optimo: {best_score - optimum}")
     print(f"Mejor posicion encontrada: {best_pos}")
     print(f"CSV de convergencia: {curve_path}")
+    print(f"CSV de resumen: {summary_path}")
     print(
         f"CSV de estados del controlador: {output_dir / 'values' / f'controller_state_F{function_id}.csv'}"
     )
@@ -120,6 +177,7 @@ def main():
         print(f"Resumen por accion: {event_summary['actions']}")
     if event_summary["stagnation_states"]:
         print(f"Resumen por estado de estancamiento: {event_summary['stagnation_states']}")
+    print(f"Episodios de estancamiento registrados: {event_summary['episode_count']}")
 
 
 if __name__ == "__main__":

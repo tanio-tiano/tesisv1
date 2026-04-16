@@ -1,0 +1,3 @@
+episode_id,start_iteration,end_iteration,duration,max_stagnation_length,selected_iteration,selected_for_shap
+1,66,90,25,74,90,1
+2,254,320,67,116,320,1
