@@ -25,13 +25,38 @@ FUNCTION_METADATA = {
     12: {"name": "Composition Function 07", "family": "composition"},
 }
 
+CONTROLLER_SENSITIVITY_PRESETS = {
+    "soft": {
+        "delta_window": 75,
+        "max_shap_episodes": None,
+        "description": "Controlador relajado: ventana grande, intervenciones menos frecuentes.",
+    },
+    "medium": {
+        "delta_window": 50,
+        "max_shap_episodes": None,
+        "description": "Controlador estándar: valores default.",
+    },
+    "hard": {
+        "delta_window": 30,
+        "max_shap_episodes": None,
+        "description": "Controlador agresivo: ventana pequeña, intervenciones más frecuentes.",
+    },
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Ejecuta suite de pruebas WO_shap sobre CEC 2022 (12 funciones). "
-            "Soft/medium/hard depende del ajuste del controlador, no de las funciones."
+            "Soft/medium/hard depende del ajuste del controlador."
         )
+    )
+    parser.add_argument(
+        "--controller-sensitivity",
+        type=str,
+        choices=["soft", "medium", "hard"],
+        default="medium",
+        help="Sensibilidad del controlador: soft (relajado), medium (estándar), hard (agresivo).",
     )
     parser.add_argument("--dim", type=int, default=10, help="Dimensionalidad CEC 2022.")
     parser.add_argument("--agents", type=int, default=30, help="Tamano de poblacion.")
@@ -39,8 +64,8 @@ def parse_args():
     parser.add_argument(
         "--delta-window",
         type=int,
-        default=50,
-        help="Ventana para detectar estancamiento.",
+        default=None,
+        help="Ventana para detectar estancamiento (sobreescribe preset si se especifica).",
     )
     parser.add_argument(
         "--max-shap-episodes",
@@ -117,6 +142,13 @@ def save_case_result(values_dir, case, problem, args, seed, best_score, best_pos
         result_path = values_dir / f"result_wo_shap_F{case['function_id']}_run{run_id}.csv"
     else:
         result_path = values_dir / f"result_wo_shap_F{case['function_id']}.csv"
+    
+    # Determinar delta_window usado
+    delta_window = args.delta_window
+    if delta_window is None:
+        sensitivity = getattr(args, 'controller_sensitivity', 'medium')
+        delta_window = CONTROLLER_SENSITIVITY_PRESETS[sensitivity]["delta_window"]
+    
     row = {
         "run_id": int(run_id) if run_id is not None else 1,
         "benchmark": "cec2022",
@@ -127,7 +159,7 @@ def save_case_result(values_dir, case, problem, args, seed, best_score, best_pos
         "dim": int(problem.dim),
         "agents": int(args.agents),
         "iterations": int(args.iterations),
-        "delta_window": int(args.delta_window),
+        "delta_window": int(delta_window),
         "seed": int(seed),
         "final_fitness": float(best_score),
         "optimum": optimum,
@@ -146,8 +178,15 @@ def run_case(case, args, values_dir, run_id=None):
     seed = int(args.seed + case["function_id"] - 1 + (run_id - 1) * 1000 if run_id else args.seed + case["function_id"] - 1)
     np.random.seed(seed)
     problem = CECProblem(case["function_id"], args.dim)
+    
+    # Determinar delta_window: CLI override > sensitivity preset > default
+    delta_window = args.delta_window
+    if delta_window is None:
+        sensitivity = getattr(args, 'controller_sensitivity', 'medium')
+        delta_window = CONTROLLER_SENSITIVITY_PRESETS[sensitivity]["delta_window"]
+    
     controller = OnlineXAIController(
-        delta_window=args.delta_window,
+        delta_window=delta_window,
         max_shap_episodes=args.max_shap_episodes,
     )
     best_score, best_pos, convergence_curve = run_wo_controlled(
@@ -314,6 +353,34 @@ def consolidate_logs(values_dir, num_runs, cases):
     return consolidated_files
 
 
+def consolidate_all_runs(values_dir, num_runs, cases, sensitivity="medium"):
+    """Consolida todas las corridas de una instancia en un único archivo."""
+    all_dfs = []
+    
+    for run_id in range(1, num_runs + 1):
+        consolidated_path = values_dir / f"consolidated_run{run_id}_all_functions.csv"
+        if consolidated_path.exists():
+            df = pd.read_csv(consolidated_path)
+            all_dfs.append(df)
+    
+    if all_dfs:
+        full_df = pd.concat(all_dfs, ignore_index=True)
+        full_df["controller_sensitivity"] = sensitivity
+        
+        # Reordenar para que sensitivity sea una de las primeras columnas
+        cols = list(full_df.columns)
+        if "controller_sensitivity" in cols:
+            cols.remove("controller_sensitivity")
+        cols = ["controller_sensitivity"] + cols
+        full_df = full_df[cols]
+        
+        global_path = values_dir / f"consolidated_all_runs_{sensitivity}_instance.csv"
+        full_df.to_csv(global_path, index=False)
+        return global_path
+    
+    return None
+
+
 def build_cases(args):
     """Construye casos para todas las 12 funciones de CEC 2022."""
     cases = []
@@ -411,6 +478,14 @@ def main():
 
     # Consolidar todos los logs de todas las corridas
     consolidated_files = consolidate_logs(values_dir, num_runs, cases)
+    
+    # Consolidado global de todas las corridas de esta instancia
+    global_consolidated_path = consolidate_all_runs(
+        values_dir, num_runs, cases, 
+        sensitivity=getattr(args, 'controller_sensitivity', 'medium')
+    )
+    if global_consolidated_path:
+        print(f"\nConsolidado global de instancia: {global_consolidated_path}")
     
     monitor_path = create_all_functions_monitor(values_dir, graphs_dir)
 
