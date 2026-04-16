@@ -8,6 +8,19 @@ Ejecucion:
 
 `python run_wo_shap_cec.py --function F8 --iterations 500 --agents 30 --output all_functions_outputs_final`
 
+Suite de pruebas CEC 2022 (`soft`, `medium`, `hard`):
+
+`python run_wo_shap_cec2022_test_suite.py --iterations 500 --agents 30 --output test_suite_outputs_cec2022`
+
+Preset por defecto de la suite:
+- `soft -> F1` (`Zakharov`, funcion basica)
+- `medium -> F7` (`Hybrid Function 10`, funcion hibrida)
+- `hard -> F12` (`Composition Function 07`, funcion de composicion)
+
+Tambien puedes sobrescribir cada caso:
+
+`python run_wo_shap_cec2022_test_suite.py --soft-function F2 --medium-function F6 --hard-function F11`
+
 Configuracion final usada en la corrida actual:
 - 50 agentes.
 - 500 iteraciones.

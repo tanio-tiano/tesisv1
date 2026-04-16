@@ -5,6 +5,10 @@ Este repositorio contiene dos implementaciones sobre benchmarks `CEC 2022`:
 - `WO_base_cec`: Walrus Optimizer base
 - `WO_shap`: Walrus Optimizer con controlador en linea, machine learning y SHAP
 
+Tambien incluye un adaptador separado para tu problema aplicado:
+
+- `custom_problem`: instancias `soft`, `medium` y `hard` como perfiles de sensibilidad
+
 ## Requisitos
 
 Dependencias principales:

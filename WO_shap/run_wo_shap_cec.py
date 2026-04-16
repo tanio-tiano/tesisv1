@@ -38,6 +38,19 @@ def parse_args():
         default=None,
         help="Numero maximo de episodios severos seleccionados para calcular SHAP. Si se omite, no hay limite.",
     )
+    parser.add_argument(
+        "--sensitivity-profile",
+        type=str,
+        default="medium",
+        choices=["soft", "medium", "hard"],
+        help="Sensibilidad del adaptador de control: soft interviene poco, medium intermedio, hard mas sensible con tope acotado.",
+    )
+    parser.add_argument(
+        "--max-interventions",
+        type=int,
+        default=None,
+        help="Tope duro de activaciones del controlador por corrida. Si se omite, usa el tope del perfil.",
+    )
     parser.add_argument("--seed", type=int, default=1234, help="Semilla aleatoria.")
     parser.add_argument(
         "--output",
@@ -83,7 +96,17 @@ def problem_optimum(problem):
     return float(getattr(problem, "f_global", np.nan))
 
 
-def save_result_summary(output_dir, function_id, problem, agents, iterations, seed, best_score, best_pos, controller):
+def save_result_summary(
+    output_dir,
+    function_id,
+    problem,
+    agents,
+    iterations,
+    seed,
+    best_score,
+    best_pos,
+    controller,
+):
     values_dir = output_dir / "values"
     values_dir.mkdir(parents=True, exist_ok=True)
     optimum = problem_optimum(problem)
@@ -99,6 +122,8 @@ def save_result_summary(output_dir, function_id, problem, agents, iterations, se
                 "agents": int(agents),
                 "iterations": int(iterations),
                 "seed": int(seed),
+                "sensitivity_profile": str(controller.sensitivity_profile),
+                "max_interventions": int(controller.max_interventions),
                 "final_fitness": float(best_score),
                 "optimum": optimum,
                 "gap_to_optimum": float(best_score - optimum) if not pd.isna(optimum) else np.nan,
@@ -124,6 +149,8 @@ def main():
     controller = OnlineXAIController(
         delta_window=args.delta_window,
         max_shap_episodes=args.max_shap_episodes,
+        sensitivity_profile=args.sensitivity_profile,
+        max_interventions=args.max_interventions,
     )
 
     best_score, best_pos, convergence_curve = run_wo_controlled(
@@ -154,6 +181,8 @@ def main():
 
     print("Ejecucion finalizada.")
     print(f"Funcion evaluada: F{function_id}")
+    print(f"Perfil de sensibilidad: {controller.sensitivity_profile}")
+    print(f"Tope de activaciones: {controller.max_interventions}")
     print(f"Mejor fitness encontrado: {best_score}")
     if not pd.isna(optimum):
         print(f"Optimo de referencia: {optimum}")

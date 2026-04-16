@@ -27,6 +27,8 @@ class OnlineXAIController:
         late_intervention_fraction=0.90,
         effective_action_cooldown=None,
         max_shap_episodes=None,
+        sensitivity_profile="medium",
+        max_interventions=None,
     ):
         self.feature_names = [
             "alpha",
@@ -38,8 +40,17 @@ class OnlineXAIController:
             "iteration",
         ]
         self.shap_output_name = "fitness"
+        profile_config = self._resolve_sensitivity_profile(
+            sensitivity_profile=sensitivity_profile,
+            delta_window=delta_window,
+            action_cooldown=action_cooldown,
+            late_intervention_fraction=late_intervention_fraction,
+            effective_action_cooldown=effective_action_cooldown,
+            max_interventions=max_interventions,
+        )
+        self.sensitivity_profile = str(profile_config["name"])
         self.baseline_window = baseline_window
-        self.delta_window = delta_window
+        self.delta_window = int(profile_config["delta_window"])
         self.shap_post_window = int(shap_post_window)
         self.epsilon_abs = epsilon_abs
         self.epsilon_rel = epsilon_rel
@@ -49,11 +60,11 @@ class OnlineXAIController:
         self.beta_adjust_scale = beta_adjust_scale
         self.partial_restart_fraction = partial_restart_fraction
         self.random_reinjection_fraction = random_reinjection_fraction
-        self.action_cooldown = action_cooldown
-        self.late_intervention_fraction = float(late_intervention_fraction)
-        self.effective_action_cooldown = (
-            None if effective_action_cooldown is None else int(effective_action_cooldown)
-        )
+        self.action_cooldown = int(profile_config["action_cooldown"])
+        self.late_intervention_fraction = float(profile_config["late_intervention_fraction"])
+        self.effective_action_cooldown = int(profile_config["effective_action_cooldown"])
+        self.max_interventions = int(profile_config["max_interventions"])
+        self.minimum_stagnation_scale = float(profile_config["minimum_stagnation_scale"])
         self.max_shap_episodes = None if max_shap_episodes is None else int(max_shap_episodes)
         self.runtime = None
         self.reset()
@@ -95,6 +106,7 @@ class OnlineXAIController:
         self.last_effective_action_iteration = -10**9
         self.pending_feedback_events = []
         self.next_event_id = 1
+        self.intervention_count = 0
 
     def plan(self, metrics):
         if self.runtime is None:
@@ -148,6 +160,7 @@ class OnlineXAIController:
             action = self._apply_shap_to_action(action, diagnosis, decision_shap)
 
         if action["event_active"]:
+            self.intervention_count += 1
             self.last_action_iteration = iteration
             self.last_action_stagnation_length = int(stagnation_length)
 
@@ -490,6 +503,7 @@ class OnlineXAIController:
                 "actions": {},
                 "stagnation_states": {},
                 "effects": {},
+                "sensitivity_profile": self.sensitivity_profile,
             }
         event_df = pd.DataFrame(self.event_log)
         return {
@@ -498,7 +512,58 @@ class OnlineXAIController:
             "actions": event_df["action_taken"].value_counts().to_dict(),
             "stagnation_states": event_df["stagnation_state"].value_counts().to_dict(),
             "effects": event_df["effect_label"].value_counts().to_dict(),
+            "sensitivity_profile": self.sensitivity_profile,
         }
+
+    def _resolve_sensitivity_profile(
+        self,
+        sensitivity_profile,
+        delta_window,
+        action_cooldown,
+        late_intervention_fraction,
+        effective_action_cooldown,
+        max_interventions,
+    ):
+        profile_name = str(sensitivity_profile).strip().lower()
+        presets = {
+            "soft": {
+                "delta_window": 60,
+                "action_cooldown": 85,
+                "late_intervention_fraction": 0.82,
+                "effective_action_cooldown": 120,
+                "max_interventions": 3,
+                "minimum_stagnation_scale": 1.25,
+            },
+            "medium": {
+                "delta_window": int(delta_window),
+                "action_cooldown": int(action_cooldown),
+                "late_intervention_fraction": float(late_intervention_fraction),
+                "effective_action_cooldown": (
+                    int(effective_action_cooldown)
+                    if effective_action_cooldown is not None
+                    else max(70, int(action_cooldown) + 20)
+                ),
+                "max_interventions": 5 if max_interventions is None else int(max_interventions),
+                "minimum_stagnation_scale": 1.00,
+            },
+            "hard": {
+                "delta_window": 40,
+                "action_cooldown": 55,
+                "late_intervention_fraction": 0.90,
+                "effective_action_cooldown": 75,
+                "max_interventions": 7,
+                "minimum_stagnation_scale": 0.85,
+            },
+        }
+        if profile_name not in presets:
+            valid = ", ".join(sorted(presets))
+            raise ValueError(f"Perfil de sensibilidad no soportado: {sensitivity_profile}. Use: {valid}.")
+
+        config = dict(presets[profile_name])
+        if max_interventions is not None:
+            config["max_interventions"] = int(max_interventions)
+        config["name"] = profile_name
+        return config
 
     def _build_shap_row(self, record, record_index, event_id, phase, shap_reason, t_pre, t_post):
         baseline_metrics = self._baseline_metrics_at(record_index)
@@ -580,6 +645,9 @@ class OnlineXAIController:
         if not stagnation:
             self.last_action_stagnation_length = None
             return "no_stagnation", self._action("none")
+
+        if self.intervention_count >= self.max_interventions:
+            return self._diagnosis_from_diversity(diversity_norm), self._action("none")
 
         late_iteration_cutoff = int(
             math.floor(self.runtime["max_iter"] * self.late_intervention_fraction)
@@ -670,10 +738,13 @@ class OnlineXAIController:
 
     def _minimum_stagnation_for_intervention(self, diagnosis):
         if diagnosis == "alta":
-            return int(self.delta_window + max(20, round(0.60 * self.delta_window)))
+            base = int(self.delta_window + max(20, round(0.60 * self.delta_window)))
+            return int(math.ceil(base * self.minimum_stagnation_scale))
         if diagnosis == "media":
-            return int(self.delta_window + max(10, round(0.30 * self.delta_window)))
-        return int(self.delta_window)
+            base = int(self.delta_window + max(10, round(0.30 * self.delta_window)))
+            return int(math.ceil(base * self.minimum_stagnation_scale))
+        base = int(self.delta_window)
+        return int(math.ceil(base * self.minimum_stagnation_scale))
 
     def _action(self, action_taken, rescue_fraction=None, rescue_mode=None):
         alpha_scale = 1.0
