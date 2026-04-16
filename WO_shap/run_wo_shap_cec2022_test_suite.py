@@ -28,16 +28,34 @@ FUNCTION_METADATA = {
 CONTROLLER_SENSITIVITY_PRESETS = {
     "soft": {
         "delta_window": 75,
+        "action_cooldown": 90,
+        "effective_action_cooldown": 120,
+        "post_effective_guard_window": 180,
+        "late_intervention_fraction": 0.84,
+        "max_interventions": 6,
+        "minimum_stagnation_scale": 1.20,
         "max_shap_episodes": None,
         "description": "Controlador relajado: ventana grande, intervenciones menos frecuentes.",
     },
     "medium": {
         "delta_window": 50,
+        "action_cooldown": 32,
+        "effective_action_cooldown": 60,
+        "post_effective_guard_window": 130,
+        "late_intervention_fraction": 0.92,
+        "max_interventions": 8,
+        "minimum_stagnation_scale": 0.95,
         "max_shap_episodes": None,
         "description": "Controlador estándar: valores default.",
     },
     "hard": {
         "delta_window": 30,
+        "action_cooldown": 20,
+        "effective_action_cooldown": 40,
+        "post_effective_guard_window": 90,
+        "late_intervention_fraction": 0.95,
+        "max_interventions": 10,
+        "minimum_stagnation_scale": 0.70,
         "max_shap_episodes": None,
         "description": "Controlador agresivo: ventana pequeña, intervenciones más frecuentes.",
     },
@@ -55,8 +73,14 @@ def parse_args():
         "--controller-sensitivity",
         type=str,
         choices=["soft", "medium", "hard"],
-        default="medium",
-        help="Sensibilidad del controlador: soft (relajado), medium (estándar), hard (agresivo).",
+        default=None,
+        help="Ejecuta una unica instancia de sensibilidad del controlador.",
+    )
+    parser.add_argument(
+        "--controller-sensitivities",
+        type=str,
+        default="soft,medium,hard",
+        help="Lista separada por comas de instancias a ejecutar. Default: soft,medium,hard.",
     )
     parser.add_argument("--dim", type=int, default=10, help="Dimensionalidad CEC 2022.")
     parser.add_argument("--agents", type=int, default=30, help="Tamano de poblacion.")
@@ -87,6 +111,32 @@ def parse_args():
         help="Carpeta donde se guardan resultados de la suite.",
     )
     return parser.parse_args()
+
+
+def parse_controller_sensitivities(args):
+    if args.controller_sensitivity is not None:
+        return [str(args.controller_sensitivity).strip().lower()]
+
+    raw = str(args.controller_sensitivities).strip()
+    if not raw:
+        return ["soft", "medium", "hard"]
+
+    values = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    allowed = {"soft", "medium", "hard"}
+    invalid = [item for item in values if item not in allowed]
+    if invalid:
+        raise ValueError(
+            f"Instancias de sensibilidad no soportadas: {', '.join(invalid)}. "
+            "Usa soft, medium y/o hard."
+        )
+
+    ordered = []
+    seen = set()
+    for value in values:
+        if value not in seen:
+            ordered.append(value)
+            seen.add(value)
+    return ordered
 
 
 def parse_function_id(function_label):
@@ -134,6 +184,132 @@ def save_curve(values_dir, function_id, convergence_curve, run_id=None):
     return curve_path
 
 
+def resolve_controller_sensitivity(args):
+    sensitivity = getattr(args, "controller_sensitivity", "medium")
+    preset = dict(CONTROLLER_SENSITIVITY_PRESETS[sensitivity])
+    if args.delta_window is not None:
+        preset["delta_window"] = int(args.delta_window)
+    if args.max_shap_episodes is not None:
+        preset["max_shap_episodes"] = int(args.max_shap_episodes)
+    preset["controller_sensitivity"] = sensitivity
+    return preset
+
+
+def build_controller(args):
+    controller_config = resolve_controller_sensitivity(args)
+    controller = OnlineXAIController(
+        delta_window=int(controller_config["delta_window"]),
+        max_shap_episodes=controller_config["max_shap_episodes"],
+        sensitivity_profile="medium",
+        max_interventions=int(controller_config["max_interventions"]),
+    )
+
+    controller.sensitivity_profile = str(controller_config["controller_sensitivity"])
+    controller.delta_window = int(controller_config["delta_window"])
+    controller.action_cooldown = int(controller_config["action_cooldown"])
+    controller.effective_action_cooldown = int(controller_config["effective_action_cooldown"])
+    controller.post_effective_guard_window = int(controller_config["post_effective_guard_window"])
+    controller.late_intervention_fraction = float(controller_config["late_intervention_fraction"])
+    controller.max_interventions = int(controller_config["max_interventions"])
+    controller.minimum_stagnation_scale = float(controller_config["minimum_stagnation_scale"])
+    controller.max_shap_episodes = controller_config["max_shap_episodes"]
+    return controller, controller_config
+
+
+def build_statistics(summary_df):
+    stats_rows = []
+    for function_id in range(1, 13):
+        case_data = summary_df[summary_df["function_id"] == function_id]
+        if len(case_data) == 0:
+            continue
+
+        fitness_std = float(case_data["final_fitness"].std(ddof=0))
+        gap_std = float(case_data["gap_to_optimum"].std(ddof=0))
+        event_std = float(case_data["event_count"].std(ddof=0))
+        episode_std = float(case_data["episode_count"].std(ddof=0))
+
+        stats_rows.append(
+            {
+                "controller_sensitivity": str(case_data["controller_sensitivity"].iloc[0]),
+                "function": f"F{function_id}",
+                "function_id": function_id,
+                "function_name": FUNCTION_METADATA[function_id]["name"],
+                "function_family": FUNCTION_METADATA[function_id]["family"],
+                "runs": int(len(case_data)),
+                "fitness_best": float(case_data["final_fitness"].min()),
+                "fitness_worst": float(case_data["final_fitness"].max()),
+                "fitness_mean": float(case_data["final_fitness"].mean()),
+                "fitness_average": float(case_data["final_fitness"].mean()),
+                "fitness_std": fitness_std,
+                "gap_best": float(case_data["gap_to_optimum"].min()),
+                "gap_worst": float(case_data["gap_to_optimum"].max()),
+                "gap_mean": float(case_data["gap_to_optimum"].mean()),
+                "gap_average": float(case_data["gap_to_optimum"].mean()),
+                "gap_std": gap_std,
+                "event_count_mean": float(case_data["event_count"].mean()),
+                "event_count_std": event_std,
+                "episode_count_mean": float(case_data["episode_count"].mean()),
+                "episode_count_std": episode_std,
+            }
+        )
+    return pd.DataFrame(stats_rows)
+
+
+def write_suite_index_html(output_dir, suite_rows):
+    cards = []
+    for row in suite_rows:
+        summary_rel = Path(row["summary_path"]).relative_to(output_dir).as_posix()
+        stats_rel = Path(row["stats_path"]).relative_to(output_dir).as_posix()
+        links = []
+        if row.get("monitor_path") is not None:
+            monitor_rel = Path(row["monitor_path"]).relative_to(output_dir).as_posix()
+            links.append(f'<li><a href="{monitor_rel}">Visualizador HTML</a></li>')
+        links.append(f'<li><a href="{summary_rel}">Resumen CSV por corrida</a></li>')
+        links.append(f'<li><a href="{stats_rel}">Estadisticas CSV por funcion</a></li>')
+        cards.append(
+            f"""
+            <div class="card">
+              <h2>{row['sensitivity']}</h2>
+              <p>{row['description']}</p>
+              <ul>
+                {''.join(links)}
+              </ul>
+            </div>
+            """
+        )
+
+    html = f"""<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WO SHAP CEC2022 - Instancias de Sensibilidad</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 32px; background: #f4f4f4; color: #222; }}
+    .wrap {{ max-width: 1100px; margin: 0 auto; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }}
+    .card {{ background: white; border-radius: 14px; padding: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); }}
+    h1 {{ margin-top: 0; }}
+    a {{ color: #0f4c81; text-decoration: none; font-weight: 600; }}
+    a:hover {{ text-decoration: underline; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>WO SHAP - CEC 2022</h1>
+    <p>Indice de resultados para las instancias soft, medium y hard del controlador.</p>
+    <div class="grid">
+      {''.join(cards)}
+    </div>
+  </div>
+</body>
+</html>
+"""
+    index_path = output_dir / "index_instances_cec2022.html"
+    index_path.write_text(html, encoding="utf-8")
+    return index_path
+
+
 def save_case_result(values_dir, case, problem, args, seed, best_score, best_pos, controller, run_id=None):
     optimum = float(getattr(problem, "f_global", np.nan))
     event_summary = controller.event_summary()
@@ -143,15 +319,10 @@ def save_case_result(values_dir, case, problem, args, seed, best_score, best_pos
     else:
         result_path = values_dir / f"result_wo_shap_F{case['function_id']}.csv"
     
-    # Determinar delta_window usado
-    delta_window = args.delta_window
-    if delta_window is None:
-        sensitivity = getattr(args, 'controller_sensitivity', 'medium')
-        delta_window = CONTROLLER_SENSITIVITY_PRESETS[sensitivity]["delta_window"]
-    
     row = {
         "run_id": int(run_id) if run_id is not None else 1,
         "benchmark": "cec2022",
+        "controller_sensitivity": str(controller.sensitivity_profile),
         "function": f"F{case['function_id']}",
         "function_id": int(case["function_id"]),
         "function_name": metadata["name"],
@@ -159,7 +330,14 @@ def save_case_result(values_dir, case, problem, args, seed, best_score, best_pos
         "dim": int(problem.dim),
         "agents": int(args.agents),
         "iterations": int(args.iterations),
-        "delta_window": int(delta_window),
+        "delta_window": int(controller.delta_window),
+        "action_cooldown": int(controller.action_cooldown),
+        "effective_action_cooldown": int(controller.effective_action_cooldown),
+        "post_effective_guard_window": int(controller.post_effective_guard_window),
+        "late_intervention_fraction": float(controller.late_intervention_fraction),
+        "max_interventions": int(controller.max_interventions),
+        "minimum_stagnation_scale": float(controller.minimum_stagnation_scale),
+        "max_shap_episodes": controller.max_shap_episodes,
         "seed": int(seed),
         "final_fitness": float(best_score),
         "optimum": optimum,
@@ -178,17 +356,8 @@ def run_case(case, args, values_dir, run_id=None):
     seed = int(args.seed + case["function_id"] - 1 + (run_id - 1) * 1000 if run_id else args.seed + case["function_id"] - 1)
     np.random.seed(seed)
     problem = CECProblem(case["function_id"], args.dim)
-    
-    # Determinar delta_window: CLI override > sensitivity preset > default
-    delta_window = args.delta_window
-    if delta_window is None:
-        sensitivity = getattr(args, 'controller_sensitivity', 'medium')
-        delta_window = CONTROLLER_SENSITIVITY_PRESETS[sensitivity]["delta_window"]
-    
-    controller = OnlineXAIController(
-        delta_window=delta_window,
-        max_shap_episodes=args.max_shap_episodes,
-    )
+
+    controller, controller_config = build_controller(args)
     best_score, best_pos, convergence_curve = run_wo_controlled(
         args.agents,
         args.iterations,
@@ -209,6 +378,7 @@ def run_case(case, args, values_dir, run_id=None):
         controller.save_logs(values_dir, case["function_id"])
     
     row = save_case_result(values_dir, case, problem, args, seed, best_score, best_pos, controller, run_id)
+    row["controller_description"] = str(controller_config["description"])
     row["curve_csv"] = str(curve_path)
     return row
 
@@ -263,7 +433,7 @@ def consolidate_logs(values_dir, num_runs, cases):
             # Cargar convergence curves
             curve_file = values_dir / f"conv_curve_shap_F{fid}_run{run_id}.csv"
             if curve_file.exists():
-                curve_data = np.loadtxt(curve_file, delimiter=",")
+                curve_data = np.loadtxt(curve_file, delimiter=",", skiprows=1)
                 if curve_data.ndim == 1:
                     curve_data = curve_data.reshape(-1, 1)
                 curves_dict = {
@@ -395,114 +565,152 @@ def build_cases(args):
 
 def main():
     args = parse_args()
+    sensitivities = parse_controller_sensitivities(args)
     cases = build_cases(args)
     validate_configuration(cases, args.dim)
 
     output_dir = Path(args.output)
-    values_dir = output_dir / "values"
-    graphs_dir = output_dir / "graphs"
-    values_dir.mkdir(parents=True, exist_ok=True)
-    graphs_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    all_rows = []
     num_runs = int(args.runs)
-    
-    for run_id in range(1, num_runs + 1):
+    suite_rows = []
+    global_rows = []
+
+    for sensitivity in sensitivities:
+        args.controller_sensitivity = sensitivity
+        instance_dir = output_dir / sensitivity
+        values_dir = instance_dir / "values"
+        graphs_dir = instance_dir / "graphs"
+        values_dir.mkdir(parents=True, exist_ok=True)
+        graphs_dir.mkdir(parents=True, exist_ok=True)
+
         print(f"\n{'='*80}")
-        print(f"CORRIDA {run_id}/{num_runs}")
-        print(f"{'='*80}\n")
-        
-        rows = []
-        for case in cases:
-            metadata = FUNCTION_METADATA[case["function_id"]]
-            print(
-                f"Ejecutando F{case['function_id']} ({metadata['name']}, {metadata['family']})"
-            )
-            row = run_case(case, args, values_dir, run_id)
-            rows.append(row)
-            print(
-                f"  final={row['final_fitness']:.12f}, optimum={row['optimum']:.12f}, "
-                f"gap={row['gap_to_optimum']:.12f}, eventos={row['event_count']}, episodios={row['episode_count']}"
-            )
-        
-        all_rows.extend(rows)
+        print(f"INSTANCIA {sensitivity.upper()}")
+        print(f"{'='*80}")
+        print(CONTROLLER_SENSITIVITY_PRESETS[sensitivity]["description"])
 
-    # Guardar resumen por corrida
-    summary_df = pd.DataFrame(all_rows)
-    summary_path = values_dir / "summary_wo_shap_cec2022_all_runs.csv"
-    summary_df.to_csv(summary_path, index=False)
+        all_rows = []
+        for run_id in range(1, num_runs + 1):
+            print(f"\n{'-'*80}")
+            print(f"CORRIDA {run_id}/{num_runs}")
+            print(f"{'-'*80}\n")
 
-    # Guardar estadísticas agregadas por función
-    if num_runs > 1:
-        stats_rows = []
-        for function_id in range(1, 13):
-            case_data = summary_df[summary_df["function_id"] == function_id]
-            if len(case_data) > 0:
-                stats_rows.append({
-                    "function": f"F{function_id}",
-                    "function_id": function_id,
-                    "function_name": FUNCTION_METADATA[function_id]["name"],
-                    "function_family": FUNCTION_METADATA[function_id]["family"],
-                    "runs": len(case_data),
-                    "final_fitness_mean": float(case_data["final_fitness"].mean()),
-                    "final_fitness_std": float(case_data["final_fitness"].std()),
-                    "final_fitness_min": float(case_data["final_fitness"].min()),
-                    "final_fitness_max": float(case_data["final_fitness"].max()),
-                    "gap_to_optimum_mean": float(case_data["gap_to_optimum"].mean()),
-                    "gap_to_optimum_std": float(case_data["gap_to_optimum"].std()),
-                    "event_count_mean": float(case_data["event_count"].mean()),
-                    "event_count_std": float(case_data["event_count"].std()),
-                })
-        
-        stats_df = pd.DataFrame(stats_rows)
-        stats_path = values_dir / "statistics_wo_shap_cec2022_aggregated.csv"
+            rows = []
+            for case in cases:
+                metadata = FUNCTION_METADATA[case["function_id"]]
+                print(
+                    f"Ejecutando F{case['function_id']} ({metadata['name']}, {metadata['family']})"
+                )
+                row = run_case(case, args, values_dir, run_id)
+                rows.append(row)
+                print(
+                    f"  final={row['final_fitness']:.12f}, optimum={row['optimum']:.12f}, "
+                    f"gap={row['gap_to_optimum']:.12f}, eventos={row['event_count']}, episodios={row['episode_count']}"
+                )
+
+            all_rows.extend(rows)
+
+        summary_df = pd.DataFrame(all_rows)
+        summary_path = values_dir / f"summary_wo_shap_cec2022_{sensitivity}_all_runs.csv"
+        summary_df.to_csv(summary_path, index=False)
+
+        stats_df = build_statistics(summary_df)
+        stats_path = values_dir / f"statistics_wo_shap_cec2022_{sensitivity}_aggregated.csv"
         stats_df.to_csv(stats_path, index=False)
-        print(f"\nEstadísticas agregadas: {stats_path}")
 
-    comparison_df = summary_df[
-        [
-            "run_id",
-            "function",
-            "function_name",
-            "function_family",
-            "final_fitness",
-            "optimum",
-            "gap_to_optimum",
-            "event_count",
-            "episode_count",
-            "status",
-        ]
-    ].copy()
-    comparison_path = values_dir / "comparison_wo_shap_cec2022_all_runs.csv"
-    comparison_df.to_csv(comparison_path, index=False)
+        comparison_df = summary_df[
+            [
+                "run_id",
+                "controller_sensitivity",
+                "function",
+                "function_name",
+                "function_family",
+                "final_fitness",
+                "optimum",
+                "gap_to_optimum",
+                "event_count",
+                "episode_count",
+                "status",
+            ]
+        ].copy()
+        comparison_path = values_dir / f"comparison_wo_shap_cec2022_{sensitivity}_all_runs.csv"
+        comparison_df.to_csv(comparison_path, index=False)
 
-    # Consolidar todos los logs de todas las corridas
-    consolidated_files = consolidate_logs(values_dir, num_runs, cases)
-    
-    # Consolidado global de todas las corridas de esta instancia
-    global_consolidated_path = consolidate_all_runs(
-        values_dir, num_runs, cases, 
-        sensitivity=getattr(args, 'controller_sensitivity', 'medium')
-    )
-    if global_consolidated_path:
-        print(f"\nConsolidado global de instancia: {global_consolidated_path}")
-    
-    monitor_path = create_all_functions_monitor(values_dir, graphs_dir)
+        consolidated_files = consolidate_logs(values_dir, num_runs, cases)
+        global_consolidated_path = consolidate_all_runs(
+            values_dir,
+            num_runs,
+            cases,
+            sensitivity=sensitivity,
+        )
+        if global_consolidated_path:
+            print(f"\nConsolidado global de instancia: {global_consolidated_path}")
 
-    print(f"\n{'='*80}")
-    print(f"RESUMEN FINAL - {num_runs} CORRIDA(S) COMPLETADA(S)")
-    print(f"{'='*80}")
-    print(f"Resumen completo: {summary_path}")
-    print(f"Comparacion: {comparison_path}")
-    if num_runs > 1:
+        monitor_path = create_all_functions_monitor(values_dir, graphs_dir)
+
+        print(f"\n{'='*80}")
+        print(f"RESUMEN FINAL - INSTANCIA {sensitivity.upper()}")
+        print(f"{'='*80}")
+        print(f"Resumen completo: {summary_path}")
+        print(f"Comparacion: {comparison_path}")
         print(f"Estadísticas agregadas: {stats_path}")
-    
-    print(f"\nARCHIVOS CONSOLIDADOS:")
-    for log_type, filepath in consolidated_files.items():
-        print(f"  - {log_type}: {filepath}")
-    
-    if monitor_path is not None:
-        print(f"\nPanel interactivo: {monitor_path}")
+        print(f"\nARCHIVOS CONSOLIDADOS:")
+        for log_type, filepath in consolidated_files.items():
+            print(f"  - {log_type}: {filepath}")
+        if monitor_path is not None:
+            print(f"\nPanel interactivo: {monitor_path}")
+
+        suite_rows.append(
+            {
+                "sensitivity": sensitivity,
+                "description": CONTROLLER_SENSITIVITY_PRESETS[sensitivity]["description"],
+                "summary_path": summary_path,
+                "stats_path": stats_path,
+                "comparison_path": comparison_path,
+                "monitor_path": monitor_path,
+            }
+        )
+        global_rows.append(summary_df)
+
+    if global_rows:
+        global_summary_df = pd.concat(global_rows, ignore_index=True)
+        global_summary_path = output_dir / "summary_wo_shap_cec2022_all_instances.csv"
+        global_summary_df.to_csv(global_summary_path, index=False)
+
+        global_stats_df = (
+            global_summary_df.groupby(
+                ["controller_sensitivity", "function", "function_id", "function_name", "function_family"],
+                as_index=False,
+            )
+            .agg(
+                runs=("run_id", "count"),
+                fitness_best=("final_fitness", "min"),
+                fitness_worst=("final_fitness", "max"),
+                fitness_mean=("final_fitness", "mean"),
+                fitness_average=("final_fitness", "mean"),
+                fitness_std=("final_fitness", lambda s: float(s.std(ddof=0))),
+                gap_best=("gap_to_optimum", "min"),
+                gap_worst=("gap_to_optimum", "max"),
+                gap_mean=("gap_to_optimum", "mean"),
+                gap_average=("gap_to_optimum", "mean"),
+                gap_std=("gap_to_optimum", lambda s: float(s.std(ddof=0))),
+                event_count_mean=("event_count", "mean"),
+                event_count_std=("event_count", lambda s: float(s.std(ddof=0))),
+                episode_count_mean=("episode_count", "mean"),
+                episode_count_std=("episode_count", lambda s: float(s.std(ddof=0))),
+            )
+        )
+        global_stats_path = output_dir / "statistics_wo_shap_cec2022_all_instances.csv"
+        global_stats_df.to_csv(global_stats_path, index=False)
+
+        index_path = write_suite_index_html(output_dir, suite_rows)
+
+        print(f"\n{'='*80}")
+        print("RESUMEN GLOBAL DE INSTANCIAS")
+        print(f"{'='*80}")
+        print(f"Resumen global: {global_summary_path}")
+        print(f"Estadísticas globales: {global_stats_path}")
+        print(f"Índice HTML: {index_path}")
 
 
 if __name__ == "__main__":
