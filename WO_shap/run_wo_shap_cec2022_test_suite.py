@@ -25,46 +25,13 @@ FUNCTION_METADATA = {
     12: {"name": "Composition Function 07", "family": "composition"},
 }
 
-DIFFICULTY_PRESETS = {
-    "soft": {
-        "function": "F1",
-        "rationale": "Funcion basica de CEC 2022, adecuada como caso suave del benchmark.",
-    },
-    "medium": {
-        "function": "F7",
-        "rationale": "Funcion hibrida representativa, con dificultad intermedia para WO_shap.",
-    },
-    "hard": {
-        "function": "F12",
-        "rationale": "Funcion de composicion, adecuada como caso dificil del benchmark.",
-    },
-}
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Ejecuta una suite de pruebas WO_shap sobre CEC 2022 con tres casos "
-            "representativos: soft, medium y hard."
+            "Ejecuta suite de pruebas WO_shap sobre CEC 2022 (12 funciones). "
+            "Soft/medium/hard depende del ajuste del controlador, no de las funciones."
         )
-    )
-    parser.add_argument(
-        "--soft-function",
-        type=str,
-        default=DIFFICULTY_PRESETS["soft"]["function"],
-        help="Funcion para el caso soft, por ejemplo F1.",
-    )
-    parser.add_argument(
-        "--medium-function",
-        type=str,
-        default=DIFFICULTY_PRESETS["medium"]["function"],
-        help="Funcion para el caso medium, por ejemplo F7.",
-    )
-    parser.add_argument(
-        "--hard-function",
-        type=str,
-        default=DIFFICULTY_PRESETS["hard"]["function"],
-        help="Funcion para el caso hard, por ejemplo F12.",
     )
     parser.add_argument("--dim", type=int, default=10, help="Dimensionalidad CEC 2022.")
     parser.add_argument("--agents", type=int, default=30, help="Tamano de poblacion.")
@@ -122,7 +89,7 @@ def validate_configuration(cases, dim):
 
     function_ids = [case["function_id"] for case in cases]
     if len(set(function_ids)) != len(function_ids):
-        raise ValueError("La suite requiere tres funciones distintas para soft, medium y hard.")
+        raise ValueError("La suite requiere funciones distintas.")
 
     if dim == 2:
         invalid_for_dim2 = [fid for fid in function_ids if fid in (6, 7, 8)]
@@ -147,14 +114,12 @@ def save_case_result(values_dir, case, problem, args, seed, best_score, best_pos
     event_summary = controller.event_summary()
     metadata = FUNCTION_METADATA[case["function_id"]]
     if run_id is not None:
-        result_path = values_dir / f"result_wo_shap_{case['difficulty']}_F{case['function_id']}_run{run_id}.csv"
+        result_path = values_dir / f"result_wo_shap_F{case['function_id']}_run{run_id}.csv"
     else:
-        result_path = values_dir / f"result_wo_shap_{case['difficulty']}_F{case['function_id']}.csv"
+        result_path = values_dir / f"result_wo_shap_F{case['function_id']}.csv"
     row = {
         "run_id": int(run_id) if run_id is not None else 1,
         "benchmark": "cec2022",
-        "difficulty": case["difficulty"],
-        "difficulty_rationale": case["rationale"],
         "function": f"F{case['function_id']}",
         "function_id": int(case["function_id"]),
         "function_name": metadata["name"],
@@ -350,23 +315,15 @@ def consolidate_logs(values_dir, num_runs, cases):
 
 
 def build_cases(args):
-    return [
-        {
-            "difficulty": "soft",
-            "function_id": parse_function_id(args.soft_function),
-            "rationale": DIFFICULTY_PRESETS["soft"]["rationale"],
-        },
-        {
-            "difficulty": "medium",
-            "function_id": parse_function_id(args.medium_function),
-            "rationale": DIFFICULTY_PRESETS["medium"]["rationale"],
-        },
-        {
-            "difficulty": "hard",
-            "function_id": parse_function_id(args.hard_function),
-            "rationale": DIFFICULTY_PRESETS["hard"]["rationale"],
-        },
-    ]
+    """Construye casos para todas las 12 funciones de CEC 2022."""
+    cases = []
+    for function_id in range(1, 13):
+        cases.append({
+            "function_id": function_id,
+            "function_name": FUNCTION_METADATA[function_id]["name"],
+            "function_family": FUNCTION_METADATA[function_id]["family"],
+        })
+    return cases
 
 
 def main():
@@ -392,8 +349,7 @@ def main():
         for case in cases:
             metadata = FUNCTION_METADATA[case["function_id"]]
             print(
-                f"Ejecutando caso {case['difficulty']} -> F{case['function_id']} "
-                f"({metadata['name']}, {metadata['family']})"
+                f"Ejecutando F{case['function_id']} ({metadata['name']}, {metadata['family']})"
             )
             row = run_case(case, args, values_dir, run_id)
             rows.append(row)
@@ -409,21 +365,17 @@ def main():
     summary_path = values_dir / "summary_wo_shap_cec2022_all_runs.csv"
     summary_df.to_csv(summary_path, index=False)
 
-    # Guardar estadísticas agregadas por función y dificultad
+    # Guardar estadísticas agregadas por función
     if num_runs > 1:
         stats_rows = []
-        for case in cases:
-            case_data = summary_df[
-                (summary_df["function_id"] == case["function_id"]) &
-                (summary_df["difficulty"] == case["difficulty"])
-            ]
+        for function_id in range(1, 13):
+            case_data = summary_df[summary_df["function_id"] == function_id]
             if len(case_data) > 0:
                 stats_rows.append({
-                    "function": f"F{case['function_id']}",
-                    "function_id": case["function_id"],
-                    "difficulty": case["difficulty"],
-                    "function_name": case_data["function_name"].iloc[0],
-                    "function_family": case_data["function_family"].iloc[0],
+                    "function": f"F{function_id}",
+                    "function_id": function_id,
+                    "function_name": FUNCTION_METADATA[function_id]["name"],
+                    "function_family": FUNCTION_METADATA[function_id]["family"],
                     "runs": len(case_data),
                     "final_fitness_mean": float(case_data["final_fitness"].mean()),
                     "final_fitness_std": float(case_data["final_fitness"].std()),
@@ -443,7 +395,6 @@ def main():
     comparison_df = summary_df[
         [
             "run_id",
-            "difficulty",
             "function",
             "function_name",
             "function_family",
