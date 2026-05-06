@@ -1,0 +1,2 @@
+run_id,benchmark,benchmark_source,algorithm,gbest_mode,function,function_id,function_name,function_family,dim,agents,iterations,seed,initial_fitness,final_fitness,optimum,gap_to_optimum,best_position,curve_csv,status
+6,cec2022,opfunu,WO_base,legacy,F12,12,Composition Function 4,composition,10,30,500,6245,3550.9168979090023,2855.2219441132625,2700.0,155.22194411326245,-100 -100 -94.8926155037 -59.2850145594 100 -42.1533314044 100 -20.0366209985 -100 53.1132551999,all_functions_outputs_30runs_legacy_20260429\values\conv_curve_F12_run6.csv,completed

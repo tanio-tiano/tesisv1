@@ -1,1 +1,0 @@
-from .paper_benchmark_23 import WOPaper23Problem

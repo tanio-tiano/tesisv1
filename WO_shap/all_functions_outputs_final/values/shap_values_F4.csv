@@ -1,3 +1,0 @@
-event_id,phase,iteration,t_pre,t_post,event_active,shap_reason,selected_output,BASE_fitness,OUTPUT_fitness,OBSERVED_fitness,stagnation_state,action_taken,dominant_feature,SHAP_alpha,SHAP_beta,SHAP_danger_signal,SHAP_safety_signal,SHAP_diversity,SHAP_diversity_norm,SHAP_iteration
-1,pre,113,113,123,1,pre_intervention,fitness,870.5033283367139,870.5033283367139,870.5033283367139,media,partial_restart,alpha,0.0,0.0,0.0,0.0,0.0,0.0,0.0
-1,post,123,113,123,0,post_intervention,fitness,870.5033283367139,870.5033283367139,870.5033283367139,alta,none,alpha,0.0,0.0,0.0,0.0,0.0,0.0,0.0

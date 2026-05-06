@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Shapiro-Wilk WO base CEC 2022</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 32px; color: #1f2933; }
+    h1 { margin-bottom: 4px; }
+    .muted { color: #64748b; }
+    table.results { border-collapse: collapse; width: 100%; font-size: 13px; }
+    table.results th, table.results td { border: 1px solid #d8dee9; padding: 7px; text-align: left; }
+    table.results th { background: #f1f5f9; }
+    code { background: #f1f5f9; padding: 2px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Normalidad por Shapiro-Wilk - WO base CEC 2022</h1>
+  <p class="muted">Fuente: <code>C:\Users\Lucci\OneDrive\Escritorio\p. Titulo\Codigos\W.O Python\WO_base_cec\all_functions_outputs_30runs_legacy_20260429\values\summary_wo_base_cec2022_30x500_30runs_legacy.csv</code></p>
+  <p>Variable analizada: <code>final_fitness</code>. Nivel de significancia: <code>alpha = 0.05</code>.</p>
+  <p>Regla: si <code>shapiro_p >= 0.05</code>, no se rechaza normalidad. Si <code>shapiro_p < 0.05</code>, se rechaza normalidad.</p>
+  <p><strong>Funciones compatibles con normalidad:</strong> F4, F6</p>
+  <p><strong>Funciones que rechazan normalidad:</strong> F1, F2, F3, F5, F7, F8, F9, F10, F11, F12</p>
+  <table border="1" class="dataframe results">
+  <thead>
+    <tr style="text-align: right;">
+      <th>function</th>
+      <th>function_name</th>
+      <th>n</th>
+      <th>mean</th>
+      <th>std</th>
+      <th>shapiro_w</th>
+      <th>shapiro_p</th>
+      <th>decision</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>F1</td>
+      <td>Shifted and full Rotated Zakharov Function</td>
+      <td>30</td>
+      <td>300.281</td>
+      <td>0.230234</td>
+      <td>0.796801</td>
+      <td>5.73574e-05</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+    <tr>
+      <td>F2</td>
+      <td>Shifted and Rotated Rosenbrock’s Function</td>
+      <td>30</td>
+      <td>428.508</td>
+      <td>30.8674</td>
+      <td>0.693086</td>
+      <td>1.23952e-06</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+    <tr>
+      <td>F3</td>
+      <td>Shifted and full Rotated Expanded Schaffer’s F7</td>
+      <td>30</td>
+      <td>600</td>
+      <td>5.09582e-06</td>
+      <td>0.581172</td>
+      <td>4.33306e-08</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+    <tr>
+      <td>F4</td>
+      <td>Shifted and Rotated Non-Continuous Rastrigin’s Function</td>
+      <td>30</td>
+      <td>854.922</td>
+      <td>16.2794</td>
+      <td>0.962754</td>
+      <td>0.36355</td>
+      <td>COMPATIBLE_NORMAL</td>
+    </tr>
+    <tr>
+      <td>F5</td>
+      <td>Shifted and Rotated Levy Function</td>
+      <td>30</td>
+      <td>900.124</td>
+      <td>0.232525</td>
+      <td>0.590116</td>
+      <td>5.54031e-08</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+    <tr>
+      <td>F6</td>
+      <td>Hybrid Function 1</td>
+      <td>30</td>
+      <td>46590.1</td>
+      <td>19831.4</td>
+      <td>0.981482</td>
+      <td>0.863435</td>
+      <td>COMPATIBLE_NORMAL</td>
+    </tr>
+    <tr>
+      <td>F7</td>
+      <td>Hybrid Function 2</td>
+      <td>30</td>
+      <td>2057.08</td>
+      <td>44.9139</td>
+      <td>0.704482</td>
+      <td>1.81421e-06</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+    <tr>
+      <td>F8</td>
+      <td>Hybrid Function 3</td>
+      <td>30</td>
+      <td>2400.82</td>
+      <td>320.321</td>
+      <td>0.588157</td>
+      <td>5.24833e-08</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+    <tr>
+      <td>F9</td>
+      <td>Composition Function 1</td>
+      <td>30</td>
+      <td>2637.55</td>
+      <td>115.235</td>
+      <td>0.444342</td>
+      <td>1.44956e-09</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+    <tr>
+      <td>F10</td>
+      <td>Composition Function 2</td>
+      <td>30</td>
+      <td>2440.91</td>
+      <td>285.374</td>
+      <td>0.867967</td>
+      <td>0.00151002</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+    <tr>
+      <td>F11</td>
+      <td>Composition Function 3</td>
+      <td>30</td>
+      <td>2626.78</td>
+      <td>145.841</td>
+      <td>0.180062</td>
+      <td>7.82687e-12</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+    <tr>
+      <td>F12</td>
+      <td>Composition Function 4</td>
+      <td>30</td>
+      <td>2859.31</td>
+      <td>7.65562</td>
+      <td>0.814173</td>
+      <td>0.000120157</td>
+      <td>RECHAZA_NORMALIDAD</td>
+    </tr>
+  </tbody>
+</table>
+</body>
+</html>
