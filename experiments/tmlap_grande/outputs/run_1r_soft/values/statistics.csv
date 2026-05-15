@@ -1,0 +1,3 @@
+algorithm,problem,runs,fitness_best,fitness_worst,fitness_mean,fitness_median,fitness_std,time_mean_seconds,interventions_mean
+WO_base,4.instancia_grande_500h_1000c,1,11690.0,11690.0,11690.0,11690.0,,1600.0276555,
+WO_shap,4.instancia_grande_500h_1000c,1,11690.0,11690.0,11690.0,11690.0,,2960.522404700001,1.0

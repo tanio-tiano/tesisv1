@@ -1,0 +1,3 @@
+algorithm,runs,best,worst,mean,std,mean_gap_to_exact_optimum,std_gap_to_exact_optimum,mean_time_seconds,total_interventions,mean_interventions
+WO_base_tmlap,30,89.0,89.0,89.0,0.0,0.0,0.0,3.314568726667009,0,0.0
+WO_tmlap_online_shap,30,89.0,89.0,89.0,0.0,0.0,0.0,28.65044309333316,180,6.0

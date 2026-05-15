@@ -1,0 +1,2 @@
+problem,n_pairs,n_nonzero,wilcoxon_p,wilcoxon_note,sign_positive,sign_negative,sign_p
+4.instancia_grande_500h_1000c,1,0,,insufficient_nonzero_pairs,0,0,

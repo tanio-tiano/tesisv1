@@ -1,0 +1,9 @@
+{
+  "algorithm": "WO_base",
+  "benchmark": "cec2022",
+  "dim": 10,
+  "agents": 30,
+  "iterations": 500,
+  "runs": 30,
+  "functions": "F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12"
+}

@@ -1,0 +1,3 @@
+test,statistic,p_value,note
+wilcoxon_signed_rank,,,insufficient_nonzero_pairs
+sign_test,0.0,1.0,positive_base_minus_shap=0; negative=1
