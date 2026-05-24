@@ -1,0 +1,12 @@
+  [exact] resolviendo backtracking (12c x 5h)...
+  [exact] optimum=151  (0.03s)
+
+== 2.instancia_mediana_5h_12c (tmlap, dim=12) | MaxFES=50000 ==
+  run=1/5 seed=1234 final=151 gap=0 interv=12 fes_shap=2304 fes_total=50000/50000 t=5.41s
+  run=2/5 seed=1235 final=151 gap=0 interv=12 fes_shap=2304 fes_total=50000/50000 t=6.08s
+  run=3/5 seed=1236 final=151 gap=0 interv=12 fes_shap=2304 fes_total=50000/50000 t=5.80s
+  run=4/5 seed=1237 final=151 gap=0 interv=11 fes_shap=2112 fes_total=50000/50000 t=7.94s
+  run=5/5 seed=1238 final=151 gap=0 interv=12 fes_shap=2304 fes_total=50000/50000 t=7.09s
+
+Resumen: experiments\test_report\tmlap_mediana\shap\values\summary.csv
+Estadisticas: experiments\test_report\tmlap_mediana\shap\values\statistics.csv

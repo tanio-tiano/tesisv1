@@ -1,16 +1,32 @@
+# Cache de Python
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
 
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Editor / SO
+.vscode/
 .DS_Store
 Thumbs.db
+desktop.ini
 
-.vscode/
-**/__pycache__/
+# Salidas de pruebas antiguas
 **/test_outputs/
 **/all_functions_outputs/
 
+# Resultados regenerables del experimento (pesados) — se generan al correr
+experiments/**/values/
+experiments/**/curves/
+*.output
+*.log
+
+# Reincluir documentacion y codigo (intencion del proyecto)
 !*.md
 !*.pdf
 !*.py

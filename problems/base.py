@@ -14,15 +14,16 @@ Atributos requeridos:
 Metodos requeridos:
 - ``evaluate(x: ndarray) -> float``
 - ``initial_population(n_agents, rng, **kwargs) -> ndarray``
-- ``make_value_function_for_shapley(state, positions, max_iter, steps, rng)
-   -> Callable[[dict], float]``  (devuelve una closure usable como
-   ``value_function`` en ``SHAPFitnessController.explain_fitness``).
+
+La ``value function`` para Shapley es **por agente** y generica (vive en
+``wo_core.agent_sim.make_value_function_for_agent``); solo necesita ``evaluate``
+y la geometria del problema, por lo que NO forma parte del contrato del problema.
 
 El protocolo se valida via ``runtime_checkable`` para que un duck-typed
 problema pueda usarse sin heredar formalmente.
 """
 
-from typing import Callable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 
@@ -41,12 +42,3 @@ class WOProblem(Protocol):
     def initial_population(
         self, n_agents: int, rng: np.random.Generator | None, **kwargs
     ) -> np.ndarray: ...
-
-    def make_value_function_for_shapley(
-        self,
-        state: dict,
-        positions: np.ndarray,
-        max_iter: int,
-        steps: int,
-        rng: np.random.Generator | None,
-    ) -> Callable[[dict], float]: ...

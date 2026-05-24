@@ -1,13 +1,21 @@
-"""SHAPFitnessController: controlador SHAP exacto + politica + cooldowns.
+"""SHAPFitnessController: controlador SHAP exacto **por agente** en regimen FES.
 
-Independiente del problema. Recibe el ``state`` (alpha, beta, danger, safety,
-diversity, iteration, stagnation_length, diversity_norm, ...) y devuelve
-una decision: intervenir o no, y con que accion/modo/fraccion.
+Independiente del problema. El flujo por iteracion del WO es:
 
-Si se le pasa una ``value_function(coalition_state) -> float``, calcula los
-6 valores SHAP exactos (64 coaliciones) sobre el fitness predicho y los usa
-para orientar la decision. La construccion de esa value function vive en
-``problems/<problema>.py`` porque depende del problema.
+1. Se detecta estancamiento **por agente**: el agente i es candidato cuando lleva
+   ``>= 10% de MaxFES`` evaluaciones (reloj de FES global) sin mejorar su mejor
+   fitness personal. Esto NO usa SHAP (es barato).
+2. Solo entonces se aplica SHAP **sobre ese agente**: ``explain_fitness`` calcula
+   los 6 valores de Shapley exactos (64 coaliciones) atribuyendo el fitness del
+   agente a las 6 senales de control globales del WO, usando una ``value
+   function`` que simula SOLO a ese agente (``wo_core.agent_sim``).
+3. ``decide`` traduce el SHAP en una accion sobre el agente (reinjeccion /
+   reinicio guiado por elite).
+
+Todas las compuertas temporales (guard, cooldowns, late, ventana de
+estancamiento, tope de gasto de SHAP) viven en **FES** y se resuelven como
+fracciones de MaxFES (ver ``profiles.py``), de modo que una unica configuracion
+sirve en los 4 presupuestos del setup.
 """
 
 from math import factorial
@@ -15,8 +23,19 @@ from math import factorial
 import numpy as np
 import pandas as pd
 
+from wo_core.agent_sim import shap_cost_estimate
+
+from .actions import REINIT_GUIDED, REINIT_RANDOM
 from .features import FEATURE_BASELINE_DEFAULTS, FEATURE_COLUMNS
-from .profiles import PROFILE_DEFAULTS
+from .profiles import (
+    AMPLIFICATION_FACTOR,
+    CONTRIBUTION_THRESHOLD,
+    DEFAULT_CONTROLLER,
+    NEUTRAL_COOLDOWN_MULTIPLIER,
+    REJECTED_COOLDOWN_MULTIPLIER,
+    RESCUE_SCALE,
+    SHAPLEY_STEPS,
+)
 
 
 def improvement_threshold(fitness, abs_eps=1e-10, rel_eps=1e-6):
@@ -25,116 +44,44 @@ def improvement_threshold(fitness, abs_eps=1e-10, rel_eps=1e-6):
 
 
 class SHAPFitnessController:
-    """Controlador configurable: SHAP explica fitness desde senales internas."""
+    """Controlador SHAP por agente; explica el fitness desde las 6 senales del WO."""
 
-    def __init__(
-        self,
-        max_iter,
-        random_state=1234,
-        profile=None,
-        rescue_scale=1.0,
-        neutral_cooldown_multiplier=1.0,
-        rejected_cooldown_multiplier=1.0,
-    ):
-        self.max_iter = int(max_iter)
-        self.profile = profile or PROFILE_DEFAULTS["soft"]
+    def __init__(self, max_fes, n_agents, random_state=1234):
+        self.max_fes = int(max_fes)
+        self.n_agents = int(n_agents)
+        # Configuracion UNICA (sin perfiles ni overrides); ver profiles.py.
+        self.profile = DEFAULT_CONTROLLER.resolve(self.max_fes)
+        self.shapley_steps = SHAPLEY_STEPS
+        self.contribution_threshold = CONTRIBUTION_THRESHOLD
+        self.amplification_factor = AMPLIFICATION_FACTOR
+        self.shap_cost_estimate = shap_cost_estimate(self.shapley_steps)
+        # Tope de explicaciones derivado del presupuesto de SHAP (coherente con
+        # shap_budget): a lo sumo cuantas explicaciones caben en shap_budget.
+        self.max_interventions = max(
+            1, self.profile.shap_budget // max(1, self.shap_cost_estimate)
+        )
         self.random_state = int(random_state)
-        self.rescue_scale = float(rescue_scale)
-        self.neutral_cooldown_multiplier = float(neutral_cooldown_multiplier)
-        self.rejected_cooldown_multiplier = float(rejected_cooldown_multiplier)
-        self.history = []
-        self.events = []
-        self.shap_rows = []
-        self.last_action_iteration = None
-        self.last_effective_iteration = None
-        self.adaptive_cooldown_until_iteration = None
-        self.adaptive_cooldown_reason = ""
-        self.intervention_count = 0
+        self.rescue_scale = RESCUE_SCALE
+        self.neutral_cooldown_multiplier = NEUTRAL_COOLDOWN_MULTIPLIER
+        self.rejected_cooldown_multiplier = REJECTED_COOLDOWN_MULTIPLIER
 
+        self.history = []          # historial de las 6 senales (para baseline Shapley)
+        self.events = []
+        self.non_events = []
+        self.shap_rows = []
+        self.intervention_count = 0
+        self.last_action_fes = {}          # por agente: FES de su ultima intervencion
+        self.last_effective_fes = None     # global: FES de la ultima intervencion efectiva
+        self.adaptive_cooldown_until_fes = None
+        self.adaptive_cooldown_reason = ""
+
+    # ------------------------------------------------------------------
+    # Historial y baseline para Shapley.
+    # ------------------------------------------------------------------
     def record_state(self, state, fitness):
         row = {key: float(state[key]) for key in FEATURE_COLUMNS}
         row["fitness"] = float(fitness)
         self.history.append(row)
-
-    def update_pending_events(self, iteration, current_fitness, diversity, stagnation_length):
-        for event in self.events:
-            if event["post_status"] != "pending":
-                continue
-            if iteration < event["post_iteration"]:
-                continue
-
-            delta = float(event["pre_fitness"] - current_fitness)
-            threshold = improvement_threshold(event["pre_fitness"])
-            if delta > threshold:
-                status = "improved"
-                self.last_effective_iteration = int(event["iteration"])
-            elif delta < -threshold:
-                status = "worsened"
-                self.extend_adaptive_cooldown(
-                    iteration,
-                    max(self.neutral_cooldown_multiplier, 3.0),
-                    "worsened",
-                )
-            else:
-                status = "neutral"
-                self.extend_adaptive_cooldown(
-                    iteration,
-                    self.neutral_cooldown_multiplier,
-                    "neutral",
-                )
-
-            event["post_status"] = status
-            event["post_fitness"] = float(current_fitness)
-            event["post_delta_fitness"] = delta
-            event["post_diversity"] = float(diversity)
-            event["post_stagnation_length"] = int(stagnation_length)
-            event["adaptive_cooldown_until_iteration"] = (
-                int(self.adaptive_cooldown_until_iteration)
-                if self.adaptive_cooldown_until_iteration is not None
-                else np.nan
-            )
-            event["adaptive_cooldown_reason"] = self.adaptive_cooldown_reason
-
-    def extend_adaptive_cooldown(self, iteration, multiplier, reason):
-        if multiplier <= 1.0:
-            return
-        cooldown = int(round(self.profile.action_cooldown * multiplier))
-        until = int(min(self.max_iter - 1, iteration + max(cooldown, 0)))
-        if (
-            self.adaptive_cooldown_until_iteration is None
-            or until > self.adaptive_cooldown_until_iteration
-        ):
-            self.adaptive_cooldown_until_iteration = until
-            self.adaptive_cooldown_reason = str(reason)
-
-    def should_consider_intervention(self, state):
-        iteration = int(state["iteration"])
-        stagnation_length = int(state["stagnation_length"])
-        diversity_norm = float(state["diversity_norm"])
-        recent_improvement_ratio = float(state.get("recent_improvement_ratio", 0.0))
-
-        if self.intervention_count >= self.profile.max_interventions:
-            return False, "max_interventions"
-        if iteration < self.profile.guard_window:
-            return False, "guard_window"
-        if iteration > self.profile.late_fraction * self.max_iter:
-            return False, "late_fraction"
-        if self.adaptive_cooldown_until_iteration is not None:
-            if iteration < self.adaptive_cooldown_until_iteration:
-                return False, "adaptive_outcome_cooldown"
-        if stagnation_length < self.profile.stagnation_window:
-            return False, "stagnation_window"
-        if recent_improvement_ratio > self.profile.max_recent_improvement_ratio:
-            return False, "recent_improvement_active"
-        if self.last_action_iteration is not None:
-            if iteration - self.last_action_iteration < self.profile.action_cooldown:
-                return False, "action_cooldown"
-        if self.last_effective_iteration is not None:
-            if iteration - self.last_effective_iteration < self.profile.effective_cooldown:
-                return False, "effective_cooldown"
-        if diversity_norm >= 0.75 and stagnation_length < 2 * self.profile.stagnation_window:
-            return False, "weak_diversity_evidence"
-        return True, "candidate"
 
     def baseline_state(self, state):
         """Baseline para Shapley: mediana del historial (fallback a defaults neutros)."""
@@ -146,20 +93,18 @@ class SHAPFitnessController:
                 values = values.replace([np.inf, -np.inf], np.nan).dropna()
                 if not values.empty:
                     baseline[feature] = float(values.median())
-
         for feature in FEATURE_COLUMNS:
             value = baseline.get(feature, np.nan)
             if not np.isfinite(value):
-                value = float(state.get(feature, FEATURE_BASELINE_DEFAULTS[feature]))
-            baseline[feature] = float(value)
-
-        baseline["iteration"] = float(
-            np.clip(round(baseline["iteration"]), 0, max(self.max_iter - 1, 0))
-        )
+                baseline[feature] = float(state.get(feature, FEATURE_BASELINE_DEFAULTS[feature]))
         return baseline
 
     def explain_fitness(self, state, value_function=None):
-        """Calcula los 6 valores SHAP exactos enumerando las 64 coaliciones."""
+        """Calcula los 6 valores SHAP exactos enumerando las 64 coaliciones.
+
+        Identico al regimen global: solo cambia la ``value_function`` inyectada,
+        que ahora simula UN agente (``wo_core.agent_sim.make_value_function_for_agent``).
+        """
         if value_function is None:
             return None
 
@@ -214,8 +159,8 @@ class SHAPFitnessController:
         dominant_feature = max(shap_map, key=lambda feature: abs(shap_map[feature]))
 
         return {
-            "target": "fitness",
-            "method": "exact_wo_shapley",
+            "target": "agent_fitness",
+            "method": "exact_wo_shapley_per_agent",
             "expected_fitness": float(expected_value),
             "predicted_fitness": float(prediction),
             "values": shap_map,
@@ -228,213 +173,133 @@ class SHAPFitnessController:
             "n_coalitions": int(1 << n_features),
         }
 
-    def decide(self, state, shap_info=None):
-        """Devuelve la decision de intervencion (action, mode, fraction) o None.
-
-        Taxonomia segun Tabla 2 del informe:
-        - ``partial_restart`` (15% base): elite_guided / _wide / _aggressive.
-        - ``random_reinjection`` (25% base): random / random_aggressive.
-        """
-        should_intervene, reason = self.should_consider_intervention(state)
-        if not should_intervene:
-            return {
-                "intervene": False,
-                "reason": reason,
-                "action": "none",
-                "mode": "none",
-                "fraction": 0.0,
-                "shap_info": None,
-                "policy_signal": reason,
-                "policy_confidence": 0.0,
-                "diversity_pressure": 0.0,
-                "stagnation_pressure": 0.0,
-                "temporal_pressure": 0.0,
-            }
-
-        if shap_info is None:
-            shap_info = self.explain_fitness(state)
+    # ------------------------------------------------------------------
+    # Compuertas (todas en FES).
+    # ------------------------------------------------------------------
+    def should_consider_intervention(self, state, budget):
+        """Devuelve (bool, reason) para el agente ``state['agent_index']``."""
+        fes = int(budget.total)
+        agent = int(state["agent_index"])
+        fes_since_improve = int(state["fes_since_improve"])
         diversity_norm = float(state["diversity_norm"])
-        stagnation_length = int(state["stagnation_length"])
-        severity = min(
-            1.0,
-            max(
-                0.0,
-                (stagnation_length - self.profile.stagnation_window)
-                / max(self.profile.stagnation_window, 1),
-            ),
-        )
+        window = self.profile.stagnation_window
 
-        shap_values = shap_info["values"] if shap_info is not None else {}
-        diversity_pressure = max(shap_values.get("diversity", 0.0), 0.0)
-        stagnation_pressure = 0.0
-        temporal_features = (
-            "iteration",
-            "alpha",
-            "beta",
-            "danger_signal",
-            "safety_signal",
-        )
-        temporal_pressure = sum(
-            max(shap_values.get(feature, 0.0), 0.0) for feature in temporal_features
-        )
-        pressure_den = (shap_info or {}).get("absolute_pressure", 0.0)
-        pressure_num = (shap_info or {}).get("positive_pressure", 0.0)
-        bad_share = pressure_num / pressure_den if pressure_den > 0 else 0.5
-        dominant_feature = (shap_info or {}).get("dominant_feature", "")
-        positive_group_pressure = diversity_pressure + stagnation_pressure + temporal_pressure
-
-        def pressure_share(value):
-            if positive_group_pressure <= 0:
-                return 0.0
-            return float(value / positive_group_pressure)
-
+        # --- Compuertas globales (presupuesto y horizonte). ---
+        if self.intervention_count >= self.max_interventions:
+            return False, "max_interventions"
+        if budget.shap >= self.profile.shap_budget:
+            return False, "shap_budget_exhausted"
+        if not budget.can_afford(self.shap_cost_estimate):
+            return False, "insufficient_budget_for_shap"
+        if fes < self.profile.guard_window:
+            return False, "guard_window"
+        if fes > self.profile.late_fes:
+            return False, "late_fraction"
         if (
-            shap_info is not None
-            and diversity_norm >= 0.75
-            and stagnation_length < 2 * self.profile.stagnation_window
-            and dominant_feature in temporal_features
-            and pressure_share(temporal_pressure) >= 0.55
-            and pressure_share(diversity_pressure) < 0.20
+            self.adaptive_cooldown_until_fes is not None
+            and fes < self.adaptive_cooldown_until_fes
         ):
-            return {
-                "intervene": False,
-                "reason": "shap_cancelled_non_diversity_pressure",
-                "action": "none",
-                "mode": "none",
-                "fraction": 0.0,
-                "shap_info": shap_info,
-                "policy_signal": "temporal_pressure_with_sufficient_diversity",
-                "policy_confidence": pressure_share(temporal_pressure),
-                "diversity_pressure": diversity_pressure,
-                "stagnation_pressure": stagnation_pressure,
-                "temporal_pressure": temporal_pressure,
-            }
+            return False, "adaptive_outcome_cooldown"
 
-        if diversity_norm < 0.25:
-            policy_signal = (
-                "shap_diversity_collapse"
-                if shap_info is not None and diversity_pressure > 0
-                else "state_diversity_collapse"
-            )
-        elif diversity_norm < 0.45:
-            policy_signal = (
-                "shap_diversity_risk"
-                if shap_info is not None and diversity_pressure > 0
-                else "state_diversity_risk"
-            )
-        elif shap_info is None:
-            if stagnation_length >= 2 * self.profile.stagnation_window:
-                policy_signal = "heuristic_long_stagnation"
-            else:
-                policy_signal = "heuristic_stagnation"
-        elif pressure_share(temporal_pressure) >= 0.50:
-            policy_signal = "shap_temporal_pressure"
+        # --- Compuertas por agente. ---
+        if fes_since_improve < window:
+            return False, "stagnation_window"
+        last_a = self.last_action_fes.get(agent)
+        if last_a is not None and fes - last_a < self.profile.action_cooldown:
+            return False, "action_cooldown"
+        if (
+            self.last_effective_fes is not None
+            and fes - self.last_effective_fes < self.profile.effective_cooldown
+        ):
+            return False, "effective_cooldown"
+        if diversity_norm >= 0.75 and fes_since_improve < 2 * window:
+            return False, "weak_diversity_evidence"
+        return True, "candidate"
+
+    # ------------------------------------------------------------------
+    # Decision por agente (politica que traduce SHAP -> accion).
+    # ------------------------------------------------------------------
+    def decide(self, state, shap_info):
+        """Bifurca la UNICA accion (reinicializar el agente) segun la contribucion
+        SHAP **conjunta** (todas las features). Asume que
+        ``should_consider_intervention`` ya paso (el runner la chequea ANTES de
+        gastar el SHAP); por eso aqui SIEMPRE se interviene. SHAP solo elige rama:
+
+        - share de la feature dominante >= ``contribution_threshold`` -> Rama B
+          (``reinit_guided``: un paso WO con la senal dominante amplificada).
+        - en otro caso -> Rama A (``reinit_random``: reinit uniforme).
+        """
+        shap_values = (shap_info or {}).get("values", {})
+        abs_values = {f: abs(float(shap_values.get(f, 0.0))) for f in FEATURE_COLUMNS}
+        total = sum(abs_values.values())
+        if total > 0:
+            dominant_feature = max(abs_values, key=abs_values.get)
+            dominant_share = abs_values[dominant_feature] / total
         else:
-            policy_signal = "shap_ambiguous_pressure"
+            dominant_feature = ""
+            dominant_share = 0.0
 
-        temporal_share = pressure_share(temporal_pressure)
-        diversity_share = pressure_share(diversity_pressure)
-
-        if policy_signal in {
-            "shap_diversity_collapse",
-            "state_diversity_collapse",
-            "heuristic_diversity_collapse",
-        }:
-            action = "random_reinjection"
-            mode = "random_aggressive"
-            fraction = 0.25 + 0.08 * severity + 0.03 * bad_share
-            fraction = float(np.clip(fraction, 0.25, 0.36))
-            policy_confidence = max(diversity_share, 0.50)
-        elif policy_signal in {
-            "shap_diversity_risk",
-            "state_diversity_risk",
-            "heuristic_diversity_risk",
-        }:
-            action = "random_reinjection"
-            mode = "random"
-            fraction = 0.20 + 0.05 * severity + 0.03 * bad_share
-            fraction = float(np.clip(fraction, 0.20, 0.30))
-            policy_confidence = max(diversity_share, 0.45)
-        elif policy_signal in {"shap_stagnation_pressure", "heuristic_long_stagnation"}:
-            action = "partial_restart"
-            mode = (
-                "elite_guided_aggressive" if severity >= 0.75 else "elite_guided_wide"
-            )
-            fraction = 0.15 + 0.06 * severity + 0.03 * bad_share
-            fraction = float(np.clip(fraction, 0.15, 0.26))
-            policy_confidence = max(pressure_share(stagnation_pressure), 0.45)
+        if dominant_share >= self.contribution_threshold:
+            action = REINIT_GUIDED
+            policy_signal = "shap_dominant_contribution"
         else:
-            action = "partial_restart"
-            mode = "elite_guided"
-            fraction = 0.12 + 0.04 * severity + 0.02 * bad_share
-            fraction = float(np.clip(fraction, 0.12, 0.20))
-            policy_confidence = max(
-                temporal_share,
-                pressure_share(stagnation_pressure),
-                diversity_share,
-                0.25,
-            )
-
-        fraction = float(np.clip(fraction * self.rescue_scale, 0.01, 0.40))
+            action = REINIT_RANDOM
+            policy_signal = "shap_no_dominant_contribution"
 
         return {
             "intervene": True,
             "reason": f"{self.profile.name}_controller_{policy_signal}",
             "action": action,
-            "mode": mode,
-            "fraction": fraction,
+            "agent_index": int(state["agent_index"]),
             "shap_info": shap_info,
             "policy_signal": policy_signal,
-            "policy_confidence": float(policy_confidence),
-            "diversity_pressure": float(diversity_pressure),
-            "stagnation_pressure": float(stagnation_pressure),
-            "temporal_pressure": float(temporal_pressure),
+            "dominant_feature": dominant_feature,
+            "dominant_share": float(dominant_share),
         }
+
+    # ------------------------------------------------------------------
+    # Cooldowns adaptativos (en FES) y registro de outcomes.
+    # ------------------------------------------------------------------
+    def extend_adaptive_cooldown(self, fes, multiplier, reason):
+        if multiplier <= 1.0:
+            return
+        cooldown = int(round(self.profile.action_cooldown * multiplier))
+        until = int(min(self.max_fes - 1, fes + max(cooldown, 0)))
+        if (
+            self.adaptive_cooldown_until_fes is None
+            or until > self.adaptive_cooldown_until_fes
+        ):
+            self.adaptive_cooldown_until_fes = until
+            self.adaptive_cooldown_reason = str(reason)
 
     def register_decision(
         self,
-        iteration,
+        fes,
         decision,
-        pre_fitness,
+        agent_index,
+        pre_agent_fitness,
+        post_agent_fitness,
         diversity,
-        stagnation_length,
-        indices,
-        accepted=True,
-        acceptance_reason="accepted_without_gate",
-        current_population_best=np.nan,
-        candidate_population_best=np.nan,
-        candidate_diversity=np.nan,
-        lookahead_steps=0,
-        current_lookahead_best=np.nan,
-        candidate_lookahead_best=np.nan,
-        lookahead_delta=np.nan,
+        fes_since_improve,
+        accepted,
+        improved,
+        acceptance_reason,
     ):
-        if decision["shap_info"] is not None:
-            shap_info = decision["shap_info"]
+        """Registra el resultado de una decision (intervencion o no) en telemetria."""
+        shap_info = decision.get("shap_info")
+        if shap_info is not None:
             shap_row = {
-                "iteration": int(iteration),
+                "fes": int(fes),
+                "agent_index": int(agent_index),
                 "controller_profile": self.profile.name,
-                "target": "fitness",
+                "target": shap_info.get("target", "agent_fitness"),
                 "action": decision["action"],
-                "mode": decision["mode"],
                 "decision_reason": decision["reason"],
                 "policy_signal": decision.get("policy_signal", ""),
-                "policy_confidence": float(decision.get("policy_confidence", np.nan)),
-                "diversity_pressure": float(decision.get("diversity_pressure", np.nan)),
-                "stagnation_pressure": float(decision.get("stagnation_pressure", np.nan)),
-                "temporal_pressure": float(decision.get("temporal_pressure", np.nan)),
-                "pre_diversity": float(diversity),
-                "pre_stagnation_length": int(stagnation_length),
-                "greedy_candidates": int(decision.get("greedy_candidates", 1)),
-                "greedy_improved_agents": float(
-                    decision.get("greedy_improved_agents", np.nan)
-                ),
-                "greedy_candidate_evaluations": int(
-                    decision.get("greedy_candidate_evaluations", 0)
-                ),
-                "proposed_intervention": bool(decision["intervene"]),
+                "dominant_share": float(decision.get("dominant_share", np.nan)),
                 "intervened": bool(decision["intervene"] and accepted),
-                "accepted_intervention": bool(accepted),
+                "accepted": bool(accepted),
+                "improved": bool(improved),
                 "acceptance_reason": acceptance_reason,
                 "shap_method": shap_info.get("method", ""),
                 "shap_n_coalitions": int(shap_info.get("n_coalitions", 0)),
@@ -451,89 +316,75 @@ class SHAPFitnessController:
             self.shap_rows.append(shap_row)
 
         if not decision["intervene"]:
+            self.non_events.append(
+                {
+                    "fes": int(fes),
+                    "agent_index": int(agent_index),
+                    "controller_profile": self.profile.name,
+                    "reason": str(decision.get("reason", "")),
+                    "policy_signal": str(decision.get("policy_signal", "")),
+                    "shap_was_computed": shap_info is not None,
+                    "pre_agent_fitness": float(pre_agent_fitness),
+                    "pre_diversity": float(diversity),
+                    "fes_since_improve": int(fes_since_improve),
+                }
+            )
             return
 
-        self.last_action_iteration = int(iteration)
+        # Es una intervencion propuesta.
+        self.last_action_fes[int(agent_index)] = int(fes)
         if accepted:
             self.intervention_count += 1
+            if improved:
+                self.last_effective_fes = int(fes)
+            else:
+                self.extend_adaptive_cooldown(
+                    fes, self.neutral_cooldown_multiplier, "neutral"
+                )
         else:
             self.extend_adaptive_cooldown(
-                iteration,
-                self.rejected_cooldown_multiplier,
-                "rejected",
+                fes, self.rejected_cooldown_multiplier, "rejected"
             )
+
         self.events.append(
             {
                 "event_id": len(self.events) + 1,
-                "iteration": int(iteration),
+                "fes": int(fes),
+                "agent_index": int(agent_index),
                 "controller_profile": self.profile.name,
                 "stagnation_window": self.profile.stagnation_window,
                 "action_cooldown": self.profile.action_cooldown,
                 "effective_cooldown": self.profile.effective_cooldown,
                 "guard_window": self.profile.guard_window,
-                "late_fraction": self.profile.late_fraction,
-                "max_interventions": self.profile.max_interventions,
-                "rescue_scale": self.rescue_scale,
-                "neutral_cooldown_multiplier": self.neutral_cooldown_multiplier,
-                "rejected_cooldown_multiplier": self.rejected_cooldown_multiplier,
+                "late_fes": self.profile.late_fes,
+                "shap_budget": self.profile.shap_budget,
+                "max_interventions": self.max_interventions,
                 "action": decision["action"],
-                "mode": decision["mode"],
-                "proposed_intervention": bool(decision["intervene"]),
                 "policy_signal": decision.get("policy_signal", ""),
-                "policy_confidence": float(decision.get("policy_confidence", np.nan)),
-                "diversity_pressure": float(decision.get("diversity_pressure", np.nan)),
-                "stagnation_pressure": float(decision.get("stagnation_pressure", np.nan)),
-                "temporal_pressure": float(decision.get("temporal_pressure", np.nan)),
-                "greedy_candidates": int(decision.get("greedy_candidates", 1)),
-                "greedy_improved_agents": float(
-                    decision.get("greedy_improved_agents", np.nan)
-                ),
-                "greedy_candidate_evaluations": int(
-                    decision.get("greedy_candidate_evaluations", 0)
-                ),
-                "fraction": float(decision["fraction"]),
-                "accepted_intervention": bool(accepted),
+                "dominant_share": float(decision.get("dominant_share", np.nan)),
+                "accepted": bool(accepted),
+                "improved": bool(improved),
                 "acceptance_reason": acceptance_reason,
-                "lookahead_steps": int(lookahead_steps),
-                "current_lookahead_best": float(current_lookahead_best),
-                "candidate_lookahead_best": float(candidate_lookahead_best),
-                "lookahead_delta": float(lookahead_delta),
-                "selected_agents": " ".join(str(int(index)) for index in indices),
-                "n_selected_agents": int(len(indices)),
-                "pre_fitness": float(pre_fitness),
-                "current_population_best": float(current_population_best),
-                "candidate_population_best": float(candidate_population_best),
+                "pre_agent_fitness": float(pre_agent_fitness),
+                "post_agent_fitness": float(post_agent_fitness),
                 "pre_diversity": float(diversity),
-                "candidate_diversity": float(candidate_diversity),
-                "pre_stagnation_length": int(stagnation_length),
-                "post_iteration": int(min(iteration + 10, self.max_iter - 1)),
-                "post_status": "pending" if accepted else "rejected_by_acceptance",
-                "post_fitness": np.nan,
-                "post_delta_fitness": np.nan,
-                "post_diversity": np.nan,
-                "post_stagnation_length": np.nan,
-                "adaptive_cooldown_until_iteration": (
-                    int(self.adaptive_cooldown_until_iteration)
-                    if self.adaptive_cooldown_until_iteration is not None
+                "fes_since_improve": int(fes_since_improve),
+                "adaptive_cooldown_until_fes": (
+                    int(self.adaptive_cooldown_until_fes)
+                    if self.adaptive_cooldown_until_fes is not None
                     else np.nan
                 ),
                 "adaptive_cooldown_reason": self.adaptive_cooldown_reason,
-                "shap_target": "fitness",
-                "shap_method": (decision["shap_info"] or {}).get("method", ""),
-                "shap_n_coalitions": int(
-                    (decision["shap_info"] or {}).get("n_coalitions", 0)
-                ),
-                "shap_dominant_feature": (decision["shap_info"] or {}).get(
-                    "dominant_feature", ""
-                ),
-                "shap_dominant_value": (decision["shap_info"] or {}).get(
-                    "dominant_value", np.nan
-                ),
+                "shap_dominant_feature": (shap_info or {}).get("dominant_feature", ""),
+                "shap_dominant_value": (shap_info or {}).get("dominant_value", np.nan),
             }
         )
 
     def events_dataframe(self):
         return pd.DataFrame(self.events)
+
+    def non_events_dataframe(self):
+        return pd.DataFrame(self.non_events)
 
     def shap_dataframe(self):
         return pd.DataFrame(self.shap_rows)

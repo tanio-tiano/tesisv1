@@ -4,40 +4,40 @@ Importacion tipica:
 
     from shap_controller import (
         SHAPFitnessController,
-        get_controller_profile,
         improvement_threshold,
         FEATURE_COLUMNS,
         FEATURE_BASELINE_DEFAULTS,
-        PARTIAL_RESTART_MODES,
-        RANDOM_REINJECTION_MODES,
-        apply_partial_restart,
-        apply_random_reinjection,
-        dispatch_rescue,
+        dispatch_rescue_single,
+        restart_single_agent,
+        reinject_single_agent,
     )
+
+El controlador tiene una configuracion UNICA (``DEFAULT_CONTROLLER`` en
+profiles.py); no hay perfiles intercambiables ni mecanismo de override.
 """
 
 from .controller import SHAPFitnessController, improvement_threshold
 from .features import FEATURE_BASELINE_DEFAULTS, FEATURE_COLUMNS
-from .profiles import ControllerProfile, PROFILE_DEFAULTS, get_controller_profile
+from .profiles import DEFAULT_CONTROLLER, ControllerProfile, ResolvedProfile
 from .actions import (
-    PARTIAL_RESTART_MODES,
-    RANDOM_REINJECTION_MODES,
-    apply_partial_restart,
-    apply_random_reinjection,
-    dispatch_rescue,
+    REINIT_GUIDED,
+    REINIT_RANDOM,
+    dispatch_rescue_single,
+    reinit_guided_agent,
+    reinit_random_agent,
 )
 
 __all__ = [
     "ControllerProfile",
+    "DEFAULT_CONTROLLER",
     "FEATURE_BASELINE_DEFAULTS",
     "FEATURE_COLUMNS",
-    "PARTIAL_RESTART_MODES",
-    "PROFILE_DEFAULTS",
-    "RANDOM_REINJECTION_MODES",
+    "REINIT_GUIDED",
+    "REINIT_RANDOM",
+    "ResolvedProfile",
     "SHAPFitnessController",
-    "apply_partial_restart",
-    "apply_random_reinjection",
-    "dispatch_rescue",
-    "get_controller_profile",
+    "dispatch_rescue_single",
+    "reinit_guided_agent",
+    "reinit_random_agent",
     "improvement_threshold",
 ]

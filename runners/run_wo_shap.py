@@ -1,29 +1,26 @@
-"""Runner WO con controlador SHAP on-line, parametrizable por problema.
+"""Runner WO + controlador SHAP **por agente** en regimen **MaxFES**.
+
+Pipeline (setup experimental: criterio de parada MaxFES):
+
+1. Inicializa la poblacion (uniforme CEC / repair[+local_search] TMLAP). Las
+   evaluaciones de inicializacion de TMLAP se contabilizan como ``fes_init``.
+2. Bucle ``while not budget.exhausted()``:
+   a. Evalua la poblacion (consciente del presupuesto -> corte exacto en MaxFES).
+   b. Actualiza el mejor personal de cada agente y su ``last_improve_fes``.
+   c. Calcula las 6 senales del WO con el schedule por FES (``phi = fes/MaxFES``).
+   d. Detecta estancamiento POR AGENTE (ventana = 10% de MaxFES) y, sobre los
+      agentes mas estancados, aplica SHAP por agente -> accion -> aceptacion.
+   e. Aplica el movimiento WO poblacional.
+3. Reporta best@MaxFES, gap al optimo y telemetria de FES (search/shap/intervention/init).
 
 Uso:
 
-    python -m runners.run_wo_shap \\
-        --problem cec2022:F6 \\
-        --runs 30 --agents 30 --iterations 500 --seed 1234 --profile soft \\
-        --output experiments/cec_F6_shap_30runs
+    python -m runners.run_wo_shap --problem cec2022:F6 --dim 10 --agents 30 \\
+        --max-fes 5000,50000,500000,5000000 --runs 51 --profile soft \\
+        --output experiments/cec_F6_shap
 
-    python -m runners.run_wo_shap \\
-        --problem tmlap:1.instancia_simple.txt \\
-        --runs 30 --agents 30 --iterations 300 --seed 1234 --profile soft \\
-        --output experiments/tmlap_simple_shap_30runs
-
-Logica:
-
-1. Inicializa la poblacion segun el problema (uniforme para CEC,
-   repair[+local_search] para TMLAP).
-2. En cada iteracion calcula las 6 features de SHAP (alpha, beta, danger,
-   safety, diversity, iteration normalizada).
-3. Llama al controlador (``SHAPFitnessController.decide``) usando una
-   ``value_function`` que el problema provee para Shapley exacto.
-4. Si la decision es intervenir, aplica ``partial_restart`` o
-   ``random_reinjection`` sobre una copia y acepta con gate
-   fitness/diversidad (compuerta Section 4 del informe).
-5. Aplica el movimiento WO estandar y avanza.
+    python -m runners.run_wo_shap --problem tmlap:1.instancia_simple.txt \\
+        --agents 30 --max-fes 50000 --runs 51 --output experiments/tmlap_simple_shap
 """
 
 from __future__ import annotations
@@ -42,18 +39,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from problems.cec2022 import FUNCTION_IDS as CEC_FUNCTION_IDS
 from problems.factory import parse_problem_spec
+from problems.tmlap import with_exact_optimum
 from shap_controller import (
-    PROFILE_DEFAULTS,
     SHAPFitnessController,
-    dispatch_rescue,
-    get_controller_profile,
+    dispatch_rescue_single,
     improvement_threshold,
 )
-from wo_core.diversity import (
-    domain_diversity_scale,
-    normalize_diversity_by_domain,
-    population_diversity,
-)
+from wo_core.agent_sim import make_value_function_for_agent
+from wo_core.diversity import population_diversity
+from wo_core.fes import FESBudget, counting_objective
 from wo_core.walrus import (
     apply_wo_movement,
     evaluate_and_update_leaders,
@@ -61,51 +55,55 @@ from wo_core.walrus import (
     walrus_role_counts,
 )
 
+# Compuertas globales: bloquean a TODOS los agentes -> detienen el escaneo de la
+# iteracion. Las demas razones son por-agente y permiten probar el siguiente.
+_GLOBAL_BLOCK_REASONS = {
+    "max_interventions",
+    "shap_budget_exhausted",
+    "insufficient_budget_for_shap",
+    "guard_window",
+    "late_fraction",
+    "adaptive_outcome_cooldown",
+    "effective_cooldown",
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Ejecuta WO con controlador SHAP on-line sobre CEC o TMLAP."
+        description="WO + controlador SHAP por agente en regimen MaxFES."
     )
     parser.add_argument("--problem", required=True)
     parser.add_argument("--dim", type=int, default=10)
     parser.add_argument("--clients", type=int, default=None)
     parser.add_argument("--hubs", type=int, default=None)
     parser.add_argument("--agents", type=int, default=30)
-    parser.add_argument("--iterations", type=int, default=300)
-    parser.add_argument("--runs", type=int, default=30)
+    parser.add_argument(
+        "--max-fes",
+        type=str,
+        default="50000",
+        help="Presupuesto(s) MaxFES, separados por coma. Ej: 5000,50000,500000,5000000",
+    )
+    parser.add_argument("--runs", type=int, default=51)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument(
-        "--profile", choices=sorted(PROFILE_DEFAULTS), default="soft"
+        "--init-mode", choices=["local_search", "random"], default="local_search",
+        help="Solo TMLAP: 'random' salta local_search (instancias grandes).",
     )
     parser.add_argument(
-        "--init-mode",
-        choices=["local_search", "random"],
-        default="local_search",
-        help="Solo TMLAP: 'random' salta local_search en init (instancias grandes).",
-    )
-    parser.add_argument(
-        "--shapley-steps",
-        type=int,
-        default=3,
-        help="Pasos de simulacion WO por cada coalicion Shapley (default 3).",
-    )
-    parser.add_argument(
-        "--acceptance-mode",
-        choices=["diversity", "strict"],
-        default="diversity",
-        help="Gate de aceptacion: 'diversity' = mejorar best O preservar+diversificar.",
-    )
-    parser.add_argument("--rescue-scale", type=float, default=1.0)
-    parser.add_argument(
-        "--neutral-cooldown-multiplier", type=float, default=1.5,
-        help="Multiplica el cooldown si la intervencion quedo neutral en t+10.",
-    )
-    parser.add_argument(
-        "--rejected-cooldown-multiplier", type=float, default=2.5,
-        help="Multiplica el cooldown si la intervencion fue rechazada por el gate.",
+        "--no-exact-optimum", action="store_true",
+        help="No calcular el optimo exacto (instancias TMLAP intratables): gap=NaN.",
     )
     parser.add_argument("--output", required=True)
+    # NOTA: el controlador tiene una configuracion UNICA fija (sin perfiles ni
+    # knobs de tuning), conforme al setup experimental. Ver shap_controller/profiles.py.
     return parser.parse_args()
+
+
+def _parse_max_fes(text):
+    values = [int(float(token.strip())) for token in str(text).split(",") if token.strip()]
+    if not values:
+        raise ValueError(f"--max-fes invalido: {text!r}")
+    return values
 
 
 def _make_problems(args):
@@ -124,72 +122,28 @@ def _make_problems(args):
     raise ValueError(f"Familia desconocida: {args.problem!r}")
 
 
-def _seed_for(args, problem_idx, run_idx):
-    return int(args.seed + problem_idx * 1000 + run_idx)
+def _seed_for(args, max_fes_idx, problem_idx, run_idx):
+    # Cada (MaxFES, problema, corrida) arranca de cero con su propia semilla.
+    return int(args.seed + max_fes_idx * 100000 + problem_idx * 1000 + run_idx)
 
 
-def _conditional_acceptance(
-    current_positions,
-    current_fitness,
-    candidate_positions,
-    candidate_fitness,
-    acceptance_mode,
-):
-    current_best = float(np.min(current_fitness))
-    candidate_best = float(np.min(candidate_fitness))
-    current_div = population_diversity(current_positions)
-    candidate_div = population_diversity(candidate_positions)
-    tol = improvement_threshold(current_best)
-
-    if candidate_best < current_best - tol:
-        return {
-            "accepted": True,
-            "reason": "improved_population_best",
-            "current_population_best": current_best,
-            "candidate_population_best": candidate_best,
-            "current_diversity": current_div,
-            "candidate_diversity": candidate_div,
-        }
-    if acceptance_mode == "strict":
-        return {
-            "accepted": False,
-            "reason": "rejected_by_strict",
-            "current_population_best": current_best,
-            "candidate_population_best": candidate_best,
-            "current_diversity": current_div,
-            "candidate_diversity": candidate_div,
-        }
-    if candidate_best <= current_best + tol and candidate_div > current_div + 1e-12:
-        return {
-            "accepted": True,
-            "reason": "preserved_best_and_increased_diversity",
-            "current_population_best": current_best,
-            "candidate_population_best": candidate_best,
-            "current_diversity": current_div,
-            "candidate_diversity": candidate_div,
-        }
-    return {
-        "accepted": False,
-        "reason": "rejected_by_conditional_acceptance",
-        "current_population_best": current_best,
-        "candidate_population_best": candidate_best,
-        "current_diversity": current_div,
-        "candidate_diversity": candidate_div,
-    }
-
-
-def run_one(problem, args, run_id, problem_idx, problem_label):
-    seed = _seed_for(args, problem_idx, run_id - 1)
+def run_one(problem, args, max_fes, max_fes_idx, run_id, problem_idx, problem_label):
+    seed = _seed_for(args, max_fes_idx, problem_idx, run_id - 1)
     rng = np.random.default_rng(seed)
     start = time.perf_counter()
 
     n_agents = args.agents
-    dim = problem.dim
-    lb = problem.lb
-    ub = problem.ub
+    dim, lb, ub = problem.dim, problem.lb, problem.ub
+    budget = FESBudget(max_fes)
+    eval_search = counting_objective(problem.evaluate, budget, "search")
+    eval_shap = counting_objective(problem.evaluate, budget, "shap")
+    eval_intervention = counting_objective(problem.evaluate, budget, "intervention")
 
-    if hasattr(problem, "family") and problem.family == "tmlap":
-        positions = problem.initial_population(n_agents, rng, init_mode=args.init_mode)
+    if getattr(problem, "family", None) == "tmlap":
+        positions = problem.initial_population(
+            n_agents, rng, init_mode=args.init_mode,
+            on_eval=lambda: budget.spend("init", 1),
+        )
     else:
         positions = problem.initial_population(n_agents, rng)
 
@@ -198,204 +152,217 @@ def run_one(problem, args, run_id, problem_idx, problem_label):
     best_score = float("inf")
     second_score = float("inf")
     male_count, female_count, child_count = walrus_role_counts(n_agents)
-    curve = np.zeros(args.iterations, dtype=float)
+    role_counts = (male_count, female_count, child_count)
 
-    profile = get_controller_profile(args.profile)
     controller = SHAPFitnessController(
-        max_iter=args.iterations,
-        random_state=seed,
-        profile=profile,
-        rescue_scale=args.rescue_scale,
-        neutral_cooldown_multiplier=args.neutral_cooldown_multiplier,
-        rejected_cooldown_multiplier=args.rejected_cooldown_multiplier,
+        max_fes=max_fes, n_agents=n_agents, random_state=seed,
     )
+    window = controller.profile.stagnation_window
 
-    last_improvement_score = float("inf")
-    stagnation_length = 0
-    best_history = []
+    pbest = np.full(n_agents, np.inf, dtype=float)
+    last_improve_fes = np.zeros(n_agents, dtype=np.int64)
     diversity_ref = None
+    curve = []  # filas (fes, best_fitness)
+    initial_fitness = np.nan
 
-    for iteration in range(args.iterations):
+    while not budget.exhausted():
+        fes_start = budget.total  # FES al inicio de la iteracion -> phi del schedule
+
+        # (a) Evaluacion de poblacion, consciente del presupuesto (corte exacto).
         (
-            positions,
-            fitness_values,
-            best_score,
-            best_pos,
-            second_score,
-            second_pos,
+            positions, fitness_values, best_score, best_pos, second_score, second_pos
         ) = evaluate_and_update_leaders(
-            positions, lb, ub, problem.evaluate,
-            best_score, best_pos, second_score, second_pos,
+            positions, lb, ub, eval_search,
+            best_score, best_pos, second_score, second_pos, budget=budget,
         )
-        gbest_x = np.tile(best_pos, (n_agents, 1))
         if not np.isfinite(second_score):
             second_pos = best_pos.copy()
+        if not np.isfinite(initial_fitness):
+            initial_fitness = float(best_score)
 
-        # Estancamiento.
-        if not np.isfinite(last_improvement_score):
-            last_improvement_score = best_score
-            stagnation_length = 0
-        else:
-            threshold = improvement_threshold(last_improvement_score)
-            if best_score < last_improvement_score - threshold:
-                last_improvement_score = best_score
-                stagnation_length = 0
-            else:
-                stagnation_length += 1
-        best_history.append(float(best_score))
+        # (b) Mejor personal por agente + reloj de su ultima mejora.
+        for i in range(n_agents):
+            f = fitness_values[i]
+            if not np.isfinite(f):
+                continue
+            if not np.isfinite(pbest[i]):
+                pbest[i] = f
+                last_improve_fes[i] = budget.total
+            elif f < pbest[i] - improvement_threshold(pbest[i]):
+                pbest[i] = f
+                last_improve_fes[i] = budget.total
 
-        # Recent improvement ratio (ventana segun profile).
-        lookback = min(profile.recent_improvement_window, max(0, len(best_history) - 1))
-        if lookback > 0:
-            ref = float(best_history[-lookback - 1])
-            recent_improvement = max(0.0, ref - float(best_score))
-            recent_improvement_ratio = recent_improvement / max(abs(ref), 1.0)
-        else:
-            recent_improvement_ratio = 0.0
+        curve.append((int(budget.total), float(best_score)))
+        if budget.exhausted():
+            break
 
-        # Senales SHAP.
-        raw_diversity = population_diversity(positions)
+        # (c) Senales del WO por FES (phi = fes_start / max_fes).
+        alpha, beta, A, R, danger_signal, safety_signal = iteration_signals(
+            fes_start, max_fes, rng
+        )
+        signal_state = {
+            "alpha": float(alpha), "beta": float(beta), "A": float(A), "R": float(R),
+            "danger_signal": float(danger_signal), "safety_signal": float(safety_signal),
+        }
+        controller.record_state(signal_state, best_score)
+
+        raw_div = float(population_diversity(positions))
         if diversity_ref is None:
-            diversity_ref = max(raw_diversity, 1e-12)
-        domain_scale = domain_diversity_scale(lb, ub)
-        diversity_norm = raw_diversity / (diversity_ref + 1e-12)
-        diversity_normalized_domain = raw_diversity / max(domain_scale, 1e-12)
+            diversity_ref = max(raw_div, 1e-12)
+        diversity_norm = raw_div / (diversity_ref + 1e-12)
 
-        alpha, beta, r_signal, danger, safety = iteration_signals(
-            iteration, args.iterations, rng
-        )
-        state = {
-            "alpha": float(alpha),
-            "beta": float(beta),
-            "danger_signal": float(danger),
-            "safety_signal": float(safety),
-            "diversity": float(diversity_normalized_domain),
-            "raw_diversity": float(raw_diversity),
-            "diversity_domain_scale": float(domain_scale),
-            "diversity_norm": float(diversity_norm),
-            "iteration": int(iteration),
-            "stagnation_length": int(stagnation_length),
-            "recent_improvement_ratio": float(recent_improvement_ratio),
-        }
-        controller.record_state(state, best_score)
-        controller.update_pending_events(iteration, best_score, raw_diversity, stagnation_length)
+        # (d) Estancamiento POR AGENTE -> SHAP -> accion. Mas estancados primero.
+        fes_since = budget.total - last_improve_fes
+        order = np.argsort(-fes_since)
+        intervened_this_iter = 0
+        top_blocked = None
 
-        # Decision (puede o no llamar a SHAP segun gate previo).
-        should_explain, _ = controller.should_consider_intervention(state)
-        shap_info = None
-        if should_explain:
-            value_function = problem.make_value_function_for_shapley(
-                state, positions, args.iterations, args.shapley_steps, rng=rng,
+        for i in order:
+            i = int(i)
+            if budget.exhausted():
+                break
+            fsi = int(budget.total - last_improve_fes[i])
+            if fsi < window:
+                break  # orden descendente: ya no hay candidatos estancados
+
+            state = {
+                **signal_state,
+                "agent_index": i,
+                "agent_fitness": float(fitness_values[i]),
+                "fes_since_improve": fsi,
+                "diversity_norm": float(diversity_norm),
+                "raw_diversity": raw_div,
+                "fes": int(budget.total),
+            }
+            should, reason = controller.should_consider_intervention(state, budget)
+            if not should:
+                if top_blocked is None:
+                    top_blocked = (i, reason, fsi, float(fitness_values[i]))
+                if reason in _GLOBAL_BLOCK_REASONS:
+                    break
+                continue  # razon por-agente: probar el siguiente agente
+
+            # SHAP por agente (gasta ~2^6 * steps FES en el bucket 'shap').
+            value_fn = make_value_function_for_agent(
+                eval_shap, i, positions, lb, ub, dim, role_counts,
+                best_pos, second_pos, signal_state, max_fes, fes_start,
+                controller.shapley_steps, rng=rng,
             )
-            shap_info = controller.explain_fitness(state, value_function=value_function)
-        decision = controller.decide(state, shap_info=shap_info)
+            shap_info = controller.explain_fitness(state, value_function=value_fn)
+            decision = controller.decide(state, shap_info)
 
-        accepted = False
-        acceptance = {
-            "accepted": False,
-            "reason": "not_proposed",
-            "current_population_best": np.nan,
-            "candidate_population_best": np.nan,
-            "current_diversity": float(raw_diversity),
-            "candidate_diversity": np.nan,
-        }
-        selected_indices = np.array([], dtype=int)
-
-        if decision["intervene"]:
-            candidate_positions, selected_indices = dispatch_rescue(
-                action=decision["action"],
-                mode=decision["mode"],
-                positions=positions,
-                fitness_values=fitness_values,
-                lb=lb, ub=ub,
-                best_pos=best_pos, second_pos=second_pos,
-                fraction=decision["fraction"],
-                rng=rng,
+            old_fitness = float(fitness_values[i])
+            # Accion UNICA bifurcada: Rama A (reinit_random) o Rama B (reinit_guided).
+            if budget.exhausted():
+                break
+            candidate = dispatch_rescue_single(
+                decision["action"], positions, i, lb, ub,
+                signals=signal_state, dominant_feature=decision["dominant_feature"],
+                role_counts=role_counts, best_pos=best_pos, second_pos=second_pos,
+                amplification_factor=controller.amplification_factor, rng=rng,
             )
-            candidate_fitness = np.array(
-                [problem.evaluate(candidate_positions[i]) for i in range(n_agents)],
-                dtype=float,
-            )
-            acceptance = _conditional_acceptance(
-                positions, fitness_values, candidate_positions, candidate_fitness,
-                acceptance_mode=args.acceptance_mode,
-            )
-            accepted = bool(acceptance["accepted"])
-            if accepted:
-                positions = candidate_positions
-                fitness_values = candidate_fitness
-                # Reflejar nuevos lideres tras el rescate.
-                order = np.argsort(fitness_values)
-                if fitness_values[order[0]] < best_score:
-                    best_score = float(fitness_values[order[0]])
-                    best_pos = positions[order[0], :].copy()
-                if len(order) > 1 and fitness_values[order[1]] < second_score:
-                    second_score = float(fitness_values[order[1]])
-                    second_pos = positions[order[1], :].copy()
-                gbest_x = np.tile(best_pos, (n_agents, 1))
+            cand_fitness = float(eval_intervention(candidate))
+            improved = cand_fitness < old_fitness - improvement_threshold(old_fitness)
 
-        controller.register_decision(
-            iteration, decision,
-            pre_fitness=best_score, diversity=raw_diversity,
-            stagnation_length=stagnation_length,
-            indices=selected_indices,
-            accepted=accepted,
-            acceptance_reason=acceptance["reason"],
-            current_population_best=acceptance["current_population_best"],
-            candidate_population_best=acceptance["candidate_population_best"],
-            candidate_diversity=acceptance["candidate_diversity"],
-        )
+            # El reinit se aplica SIEMPRE (sin gate greedy). El GBest se preserva
+            # (solo sube). Reseteamos el reloj de estancamiento del agente (ventana
+            # fresca del 10%); el action_cooldown (5%) espacia re-intervenciones.
+            positions[i, :] = candidate
+            fitness_values[i] = cand_fitness
+            last_improve_fes[i] = budget.total
+            if cand_fitness < pbest[i]:
+                pbest[i] = cand_fitness
+            if cand_fitness < best_score:
+                best_score = cand_fitness
+                best_pos = candidate.copy()
+            elif cand_fitness < second_score:
+                second_score = cand_fitness
+                second_pos = candidate.copy()
+            intervened_this_iter += 1
 
-        # Movimiento WO normal.
+            controller.register_decision(
+                budget.total, decision, i, old_fitness, cand_fitness,
+                raw_div, fsi, accepted=True, improved=improved,
+                acceptance_reason="applied_improved" if improved else "applied_worse",
+            )
+
+        if intervened_this_iter == 0 and top_blocked is not None:
+            ai, areason, afsi, afit = top_blocked
+            controller.register_decision(
+                budget.total,
+                {"intervene": False, "reason": areason, "action": "none",
+                 "shap_info": None, "policy_signal": areason},
+                ai, afit, afit, raw_div, afsi,
+                accepted=False, improved=False, acceptance_reason="blocked",
+            )
+
+        if budget.exhausted():
+            break
+
+        # (e) Movimiento WO poblacional con las senales por FES.
+        gbest_x = np.tile(best_pos, (n_agents, 1))
         positions = apply_wo_movement(
             positions, lb, ub, dim, n_agents,
             male_count, female_count, child_count,
             best_pos, second_pos, gbest_x,
-            alpha, beta, r_signal, danger, safety, rng=rng,
+            alpha, beta, R, danger_signal, safety_signal, rng=rng,
         )
-        curve[iteration] = best_score
+
+    if not curve or curve[-1][0] != budget.total:
+        curve.append((int(budget.total), float(best_score)))
 
     elapsed = time.perf_counter() - start
-    optimum = getattr(problem, "optimum", np.nan)
-    optimum_f = float(optimum) if optimum is not None and np.isfinite(float(optimum)) else np.nan
+    declared = getattr(problem, "optimum", np.nan)
+    optimum_f = (
+        float(declared)
+        if declared is not None and np.isfinite(float(declared))
+        else np.nan
+    )
     gap = float(best_score - optimum_f) if np.isfinite(optimum_f) else np.nan
 
+    row = {
+        "run_id": int(run_id),
+        "seed": int(seed),
+        "algorithm": "WO_shap",
+        "controller_profile": controller.profile.name,
+        "problem_spec": args.problem,
+        "problem_family": getattr(problem, "family", "unknown"),
+        "problem": problem_label,
+        "dim": int(dim),
+        "agents": int(n_agents),
+        "max_fes": int(max_fes),
+        "initial_fitness": float(initial_fitness),
+        "final_fitness": float(best_score),
+        "optimum": optimum_f,
+        "gap_to_optimum": gap,
+        "interventions": int(controller.intervention_count),
+        "shap_explanations": int(len(controller.shap_rows)),
+        "elapsed_seconds": float(elapsed),
+        "best_position": " ".join(f"{v:.12g}" for v in best_pos),
+        "init_mode": args.init_mode,
+        "shapley_steps": int(controller.shapley_steps),
+    }
+    _actions = [event["action"] for event in controller.events]
+    row["n_reinit_random"] = int(sum(a == "reinit_random" for a in _actions))
+    row["n_reinit_guided"] = int(sum(a == "reinit_guided" for a in _actions))
+    row.update(budget.as_dict())
+
     return {
-        "row": {
-            "run_id": int(run_id),
-            "seed": int(seed),
-            "algorithm": "WO_shap",
-            "controller_profile": profile.name,
-            "problem_spec": args.problem,
-            "problem_family": getattr(problem, "family", "unknown"),
-            "problem": problem_label,
-            "dim": int(dim),
-            "agents": int(n_agents),
-            "iterations": int(args.iterations),
-            "initial_fitness": float(curve[0]),
-            "final_fitness": float(best_score),
-            "optimum": optimum_f,
-            "gap_to_optimum": gap,
-            "interventions": int(controller.intervention_count),
-            "shap_explanations": int(len(controller.shap_rows)),
-            "elapsed_seconds": float(elapsed),
-            "best_position": " ".join(f"{v:.12g}" for v in best_pos),
-            "init_mode": args.init_mode,
-            "acceptance_mode": args.acceptance_mode,
-            "shapley_steps": int(args.shapley_steps),
-        },
-        "curve": curve,
+        "row": row,
+        "curve": np.asarray(curve, dtype=float),
         "events": controller.events_dataframe(),
+        "non_events": controller.non_events_dataframe(),
         "shap_rows": controller.shap_dataframe(),
     }
 
 
 def build_statistics(summary_df):
     rows = []
-    for problem_label, data in summary_df.groupby("problem", sort=True):
+    for (problem_label, max_fes), data in summary_df.groupby(["problem", "max_fes"], sort=True):
         rows.append(
             {
                 "problem": problem_label,
+                "max_fes": int(max_fes),
                 "problem_family": data.iloc[0]["problem_family"],
                 "runs": int(data["run_id"].nunique()),
                 "fitness_best": float(data["final_fitness"].min()),
@@ -403,12 +370,11 @@ def build_statistics(summary_df):
                 "fitness_mean": float(data["final_fitness"].mean()),
                 "fitness_median": float(data["final_fitness"].median()),
                 "fitness_std": float(data["final_fitness"].std(ddof=1)),
-                "gap_best": float(data["gap_to_optimum"].min()),
-                "gap_worst": float(data["gap_to_optimum"].max()),
                 "gap_mean": float(data["gap_to_optimum"].mean()),
                 "gap_std": float(data["gap_to_optimum"].std(ddof=1)),
                 "interventions_mean": float(data["interventions"].mean()),
-                "interventions_total": int(data["interventions"].sum()),
+                "shap_explanations_mean": float(data["shap_explanations"].mean()),
+                "fes_shap_mean": float(data["fes_shap"].mean()),
                 "time_mean_seconds": float(data["elapsed_seconds"].mean()),
             }
         )
@@ -417,6 +383,7 @@ def build_statistics(summary_df):
 
 def main():
     args = parse_args()
+    max_fes_values = _parse_max_fes(args.max_fes)
     problems = _make_problems(args)
     output_dir = Path(args.output)
     values_dir = output_dir / "values"
@@ -424,54 +391,59 @@ def main():
     values_dir.mkdir(parents=True, exist_ok=True)
     curves_dir.mkdir(parents=True, exist_ok=True)
 
-    rows = []
-    all_events = []
-    all_shap = []
-    for problem_idx, (problem, label) in enumerate(problems):
-        print(f"\n== {label} ({getattr(problem, 'family', 'unknown')}, dim={problem.dim}) ==",
-              flush=True)
-        for run_id in range(1, args.runs + 1):
-            result = run_one(problem, args, run_id, problem_idx, label)
-            rows.append(result["row"])
-            curve_path = curves_dir / f"conv_curve_{label}_run{run_id}.csv"
-            np.savetxt(curve_path, result["curve"], delimiter=",",
-                       header="best_fitness", comments="")
-            if not result["events"].empty:
-                ev = result["events"].copy()
-                ev.insert(0, "problem", label)
-                ev.insert(0, "run_id", run_id)
-                all_events.append(ev)
-            if not result["shap_rows"].empty:
-                sr = result["shap_rows"].copy()
-                sr.insert(0, "problem", label)
-                sr.insert(0, "run_id", run_id)
-                all_shap.append(sr)
-            row = result["row"]
+    rows, all_events, all_non_events, all_shap = [], [], [], []
+    if not args.no_exact_optimum:
+        problems = [(with_exact_optimum(problem), label) for problem, label in problems]
+
+    for max_fes_idx, max_fes in enumerate(max_fes_values):
+        for problem_idx, (problem, label) in enumerate(problems):
             print(
-                f"  run={run_id}/{args.runs} seed={row['seed']} "
-                f"final={row['final_fitness']:.6g} gap={row['gap_to_optimum']:.6g} "
-                f"interventions={row['interventions']} time={row['elapsed_seconds']:.2f}s",
-                flush=True,
+                f"\n== {label} ({getattr(problem, 'family', 'unknown')}, "
+                f"dim={problem.dim}) | MaxFES={max_fes} ==", flush=True,
             )
+            for run_id in range(1, args.runs + 1):
+                result = run_one(
+                    problem, args, max_fes, max_fes_idx, run_id, problem_idx, label
+                )
+                rows.append(result["row"])
+                curve_path = curves_dir / f"conv_curve_{label}_fes{max_fes}_run{run_id}.csv"
+                np.savetxt(curve_path, result["curve"], delimiter=",",
+                           header="fes,best_fitness", comments="")
+                for bucket, store in (
+                    ("events", all_events), ("non_events", all_non_events),
+                    ("shap_rows", all_shap),
+                ):
+                    df = result[bucket]
+                    if not df.empty:
+                        df = df.copy()
+                        df.insert(0, "max_fes", max_fes)
+                        df.insert(0, "problem", label)
+                        df.insert(0, "run_id", run_id)
+                        store.append(df)
+                r = result["row"]
+                print(
+                    f"  run={run_id}/{args.runs} seed={r['seed']} "
+                    f"final={r['final_fitness']:.6g} gap={r['gap_to_optimum']:.6g} "
+                    f"interv={r['interventions']} fes_shap={r['fes_shap']} "
+                    f"fes_total={r['fes_total']}/{r['max_fes']} t={r['elapsed_seconds']:.2f}s",
+                    flush=True,
+                )
 
     summary_df = pd.DataFrame(rows)
     summary_df.to_csv(values_dir / "summary.csv", index=False)
-    stats_df = build_statistics(summary_df)
-    stats_df.to_csv(values_dir / "statistics.csv", index=False)
-
+    build_statistics(summary_df).to_csv(values_dir / "statistics.csv", index=False)
     if all_events:
-        events_df = pd.concat(all_events, ignore_index=True)
-        events_df.to_csv(values_dir / "controller_events.csv", index=False)
+        pd.concat(all_events, ignore_index=True).to_csv(
+            values_dir / "controller_events.csv", index=False)
+    if all_non_events:
+        pd.concat(all_non_events, ignore_index=True).to_csv(
+            values_dir / "controller_non_events.csv", index=False)
     if all_shap:
-        shap_df = pd.concat(all_shap, ignore_index=True)
-        shap_df.to_csv(values_dir / "shap_values.csv", index=False)
+        pd.concat(all_shap, ignore_index=True).to_csv(
+            values_dir / "shap_values.csv", index=False)
 
     print(f"\nResumen: {values_dir / 'summary.csv'}")
     print(f"Estadisticas: {values_dir / 'statistics.csv'}")
-    if all_events:
-        print(f"Eventos del controlador: {values_dir / 'controller_events.csv'}")
-    if all_shap:
-        print(f"Valores SHAP: {values_dir / 'shap_values.csv'}")
 
 
 if __name__ == "__main__":

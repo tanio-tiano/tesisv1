@@ -1,31 +1,37 @@
-"""Acciones de rescate del controlador (Tabla 2 del informe).
+"""Acciones de rescate del controlador SHAP — **una sola accion, bifurcada por SHAP**.
 
-Dos acciones canonicas:
+Diseno fijado con el guia (reunion 2026-05-19): cuando un agente se estanca, la
+unica accion es **reinicializar su posicion**, con una bifurcacion segun la
+explicabilidad:
 
-- ``partial_restart`` recoloca a la fraccion de peores agentes alrededor de
-  soluciones elite, preservando la memoria estructural de la busqueda.
-  Modos: ``elite_guided``, ``elite_guided_wide``, ``elite_guided_aggressive``.
-- ``random_reinjection`` sustituye a la fraccion de peores por agentes
-  generados uniformemente dentro del dominio. La variante ``random_aggressive``
-  agrega un jitter gaussiano sobre el muestreo.
+- **Rama A (`reinit_random`)** — sin contribucion dominante: reinit uniforme en
+  ``[lb, ub]`` con la formula clasica ``lb + (ub - lb)*rand`` (descarta la
+  posicion). Es el principio clasico de des-estancamiento aleatorio.
+- **Rama B (`reinit_guided`)** — con contribucion dominante (>= umbral): un paso
+  del movimiento WO **desde la posicion actual** con la **senal dominante
+  amplificada** (mutacion guiada por la variable que mas contribuye).
 
-Ambas aceptan un ``rng`` opcional (``np.random.Generator``); si es None,
-usan ``np.random`` global.
+Aceptan ``rng`` opcional; devuelven el nuevo **vector** de posicion del agente.
 """
 
 import numpy as np
 
+from wo_core.walrus import apply_wo_movement_single
 
-PARTIAL_RESTART_MODES = (
-    "elite_guided",
-    "elite_guided_wide",
-    "elite_guided_aggressive",
-)
+from .features import FEATURE_BASELINE_DEFAULTS
 
-RANDOM_REINJECTION_MODES = (
-    "random",
-    "random_aggressive",
-)
+REINIT_RANDOM = "reinit_random"
+REINIT_GUIDED = "reinit_guided"
+
+# Rangos validos de cada senal, para acotar la amplificacion de la Rama B.
+_SIGNAL_RANGES = {
+    "alpha": (0.0, 1.0),
+    "beta": (0.0, 1.0),
+    "A": (0.0, 2.0),
+    "R": (-1.0, 1.0),
+    "danger_signal": (-2.0, 2.0),
+    "safety_signal": (0.0, 1.0),
+}
 
 
 def _draw_normal(rng, scale, size):
@@ -40,133 +46,84 @@ def _draw_uniform(rng, size):
     return rng.random(size=size)
 
 
-def _randint(rng, high):
-    if rng is None:
-        return int(np.random.randint(0, high))
-    return int(rng.integers(0, high))
+def reinit_random_agent(positions, index, lb, ub, rng=None):
+    """Rama A: reinit uniforme del agente ``index`` en ``[lb, ub]``.
 
-
-def apply_partial_restart(
-    positions,
-    fitness_values,
-    lb,
-    ub,
-    best_pos,
-    second_pos,
-    fraction,
-    mode,
-    rng=None,
-):
-    """Partial restart guiado por elites.
-
-    Selecciona la ``fraction`` de peores agentes y los recoloca alrededor de
-    X_best, X_second y otros lideres top-5, con dispersion gaussiana controlada
-    por ``mode`` (``elite_guided`` < ``_wide`` < ``_aggressive``).
+    Es la formula clasica de inicializacion del WO: ``lb + (ub - lb)*rand``.
+    Descarta la posicion previa (des-estancamiento puramente aleatorio).
     """
-    positions = positions.copy()
-    n_agents, dim = positions.shape
-    n_selected = max(1, int(round(fraction * n_agents)))
-    n_selected = min(n_selected, n_agents - 1)
-    worst_indices = np.argsort(fitness_values)[::-1][:n_selected]
-
-    best_indices = np.argsort(fitness_values)[: max(2, min(5, n_agents))]
-    elite_positions = [np.asarray(best_pos, dtype=float)]
-    second = np.asarray(second_pos, dtype=float)
-    if np.all(np.isfinite(second)):
-        elite_positions.append(second)
-    elite_positions.extend(positions[index].copy() for index in best_indices)
-
-    spread_by_mode = {
-        "elite_guided": 0.035,
-        "elite_guided_wide": 0.075,
-        "elite_guided_aggressive": 0.12,
-    }
-    spread = spread_by_mode.get(mode, spread_by_mode["elite_guided"])
-    span = np.asarray(ub, dtype=float) - np.asarray(lb, dtype=float)
-
-    for index in worst_indices:
-        anchor = elite_positions[_randint(rng, len(elite_positions))]
-        noise = _draw_normal(rng, spread, dim) * span
-        positions[index, :] = anchor + noise
-
-    return np.clip(positions, lb, ub), worst_indices
-
-
-def apply_random_reinjection(
-    positions,
-    fitness_values,
-    lb,
-    ub,
-    fraction,
-    mode,
-    rng=None,
-):
-    """Random reinjection dentro del dominio.
-
-    Sustituye a la ``fraction`` de peores agentes por muestras uniformes en
-    [lb, ub]. El modo ``random_aggressive`` agrega un jitter gaussiano de
-    desviacion 0.05 sobre el span del dominio.
-    """
-    positions = positions.copy()
-    n_agents, dim = positions.shape
-    n_selected = max(1, int(round(fraction * n_agents)))
-    n_selected = min(n_selected, n_agents - 1)
-    worst_indices = np.argsort(fitness_values)[::-1][:n_selected]
     lb_arr = np.asarray(lb, dtype=float)
     ub_arr = np.asarray(ub, dtype=float)
-    span = ub_arr - lb_arr
-
-    uniform = _draw_uniform(rng, (n_selected, dim))
-    candidates = uniform * span + lb_arr
-    if mode == "random_aggressive":
-        candidates = candidates + _draw_normal(rng, 0.05, (n_selected, dim)) * span
-
-    positions[worst_indices, :] = candidates
-    return np.clip(positions, lb_arr, ub_arr), worst_indices
+    dim = positions.shape[1]
+    candidate = _draw_uniform(rng, dim) * (ub_arr - lb_arr) + lb_arr
+    return np.clip(candidate, lb_arr, ub_arr)
 
 
-def dispatch_rescue(
-    action,
-    mode,
+def reinit_guided_agent(
     positions,
-    fitness_values,
+    index,
     lb,
     ub,
+    signals,
+    dominant_feature,
+    role_counts,
     best_pos,
     second_pos,
-    fraction,
+    amplification_factor,
     rng=None,
 ):
-    """Dispatcher unificado para ambas acciones canonicas.
+    """Rama B: un paso WO desde la posicion actual con la senal dominante amplificada.
 
-    Acepta ``action in {'partial_restart', 'random_reinjection'}`` y enruta a
-    la funcion correspondiente con un fallback si el ``mode`` no coincide.
+    ``signals`` es el dict de las 6 senales actuales (alpha, beta, A, R,
+    danger_signal, safety_signal). Se amplifica SOLO ``dominant_feature``
+    alejandola de su baseline neutro: ``sig' = base + factor*(sig - base)``
+    (acotada a su rango valido). Luego se ejecuta un unico paso de
+    ``apply_wo_movement_single`` con esas senales. Devuelve la nueva posicion.
     """
-    if action == "partial_restart" or mode in PARTIAL_RESTART_MODES:
-        chosen_mode = mode if mode in PARTIAL_RESTART_MODES else "elite_guided"
-        return apply_partial_restart(
-            positions,
-            fitness_values,
-            lb,
-            ub,
-            best_pos,
-            second_pos,
-            fraction,
-            chosen_mode,
-            rng=rng,
-        )
-    if action == "random_reinjection" or mode in RANDOM_REINJECTION_MODES:
-        chosen_mode = mode if mode in RANDOM_REINJECTION_MODES else "random"
-        return apply_random_reinjection(
-            positions,
-            fitness_values,
-            lb,
-            ub,
-            fraction,
-            chosen_mode,
-            rng=rng,
-        )
-    raise ValueError(
-        f"Accion/mode desconocidos: action={action!r}, mode={mode!r}. "
-        f"Validas: partial_restart {PARTIAL_RESTART_MODES}, random_reinjection {RANDOM_REINJECTION_MODES}."
+    amplified = {key: float(value) for key, value in signals.items()}
+    if dominant_feature in amplified and dominant_feature in FEATURE_BASELINE_DEFAULTS:
+        base = FEATURE_BASELINE_DEFAULTS[dominant_feature]
+        value = base + float(amplification_factor) * (amplified[dominant_feature] - base)
+        lo, hi = _SIGNAL_RANGES.get(dominant_feature, (-np.inf, np.inf))
+        amplified[dominant_feature] = float(np.clip(value, lo, hi))
+
+    n_agents, dim = positions.shape
+    male_count, female_count, child_count = role_counts
+    gbest_row = np.asarray(best_pos, dtype=float)
+    return apply_wo_movement_single(
+        positions, index, lb, ub, dim, n_agents,
+        male_count, female_count, child_count,
+        best_pos, second_pos, gbest_row,
+        amplified["alpha"], amplified["beta"], amplified["R"],
+        amplified["danger_signal"], amplified["safety_signal"], rng=rng,
     )
+
+
+def dispatch_rescue_single(
+    action,
+    positions,
+    index,
+    lb,
+    ub,
+    *,
+    signals=None,
+    dominant_feature=None,
+    role_counts=None,
+    best_pos=None,
+    second_pos=None,
+    amplification_factor=2.0,
+    rng=None,
+):
+    """Enruta a la rama A (``reinit_random``) o B (``reinit_guided``).
+
+    Devuelve el nuevo vector de posicion del agente ``index``. La Rama B requiere
+    ``signals``, ``dominant_feature``, ``role_counts``, ``best_pos``, ``second_pos``.
+    """
+    if action == REINIT_GUIDED:
+        return reinit_guided_agent(
+            positions, index, lb, ub, signals, dominant_feature,
+            role_counts, best_pos, second_pos, amplification_factor, rng=rng,
+        )
+    if action == REINIT_RANDOM:
+        return reinit_random_agent(positions, index, lb, ub, rng=rng)
+    raise ValueError(f"Accion de rescate desconocida: {action!r}.")

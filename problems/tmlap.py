@@ -20,19 +20,11 @@ Para WO, la inicializacion puede ser:
 
 import ast
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
-
-from wo_core.diversity import population_diversity
-from wo_core.walrus import (
-    apply_wo_movement,
-    evaluate_and_update_leaders,
-    iteration_signals,
-    r_signal_from_alpha_and_danger,
-    walrus_role_counts,
-)
 
 
 @dataclass(frozen=True)
@@ -154,10 +146,18 @@ class TMLAPProblem:
 
         return repaired
 
-    def local_search(self, assignment, rng, max_passes=2):
-        """Una busqueda local greedy sobre la asignacion. Costo O(n_clients*n_feas*repair)."""
+    def local_search(self, assignment, rng, max_passes=2, on_eval=None):
+        """Una busqueda local greedy sobre la asignacion. Costo O(n_clients*n_feas*repair).
+
+        ``on_eval`` (opcional) es un callback sin argumentos que se invoca una vez
+        por cada evaluacion del objetivo (``objective_assignment``). Sirve para
+        contabilizar esas evaluaciones como FES de inicializacion bajo el
+        protocolo MaxFES (ver ``wo_core.fes``).
+        """
         current = self.repair(assignment)
         current_value = self.objective_assignment(current)
+        if on_eval is not None:
+            on_eval()
         for _ in range(max_passes):
             improved = False
             clients = np.arange(self.n_clients)
@@ -174,6 +174,8 @@ class TMLAPProblem:
                     trial[client] = hub
                     trial = self.repair(trial)
                     value = self.objective_assignment(trial)
+                    if on_eval is not None:
+                        on_eval()
                     if value < current_value - 1e-12:
                         current = trial
                         current_value = value
@@ -183,12 +185,17 @@ class TMLAPProblem:
                 break
         return current
 
-    def random_feasible_assignment(self, rng, init_mode="local_search"):
-        """Inicializa con repair (opcionalmente + 1 pasada de local_search)."""
+    def random_feasible_assignment(self, rng, init_mode="local_search", on_eval=None):
+        """Inicializa con repair (opcionalmente + 1 pasada de local_search).
+
+        ``repair`` no evalua el objetivo (usa un score heuristico), asi que
+        ``init_mode='random'`` no consume FES. ``init_mode='local_search'`` si
+        evalua via ``local_search`` y contabiliza por ``on_eval``.
+        """
         random_raw = rng.integers(0, self.n_hubs, size=self.n_clients)
         if init_mode == "random":
             return self.repair(random_raw)
-        return self.local_search(self.repair(random_raw), rng, max_passes=1)
+        return self.local_search(self.repair(random_raw), rng, max_passes=1, on_eval=on_eval)
 
     # ------------------------------------------------------------------
     # Contrato WOProblem.
@@ -198,44 +205,16 @@ class TMLAPProblem:
         repaired = self.repair(self.decode(x))
         return float(self.objective_assignment(repaired))
 
-    def initial_population(self, n_agents, rng=None, *, init_mode="local_search"):
+    def initial_population(self, n_agents, rng=None, *, init_mode="local_search", on_eval=None):
         if rng is None:
             rng = np.random.default_rng()
         positions = np.zeros((n_agents, self.n_clients), dtype=float)
         for idx in range(n_agents):
-            assignment = self.random_feasible_assignment(rng, init_mode=init_mode)
+            assignment = self.random_feasible_assignment(
+                rng, init_mode=init_mode, on_eval=on_eval
+            )
             positions[idx, :] = self.position_from_assignment(assignment, rng, jitter=0.12)
         return positions
-
-    def make_value_function_for_shapley(self, state, positions, max_iter, steps, rng=None):
-        """Devuelve closure ``v(coalition_state) -> float`` simulando k pasos del WO."""
-        initial_positions = np.asarray(positions, dtype=float).copy()
-        current_state = dict(state)
-
-        if rng is None:
-            outer_state = np.random.get_state()
-        else:
-            outer_state = rng.bit_generator.state
-
-        def value_function(coalition_state):
-            if rng is None:
-                saved = np.random.get_state()
-                np.random.set_state(outer_state)
-                try:
-                    return _simulate(self, initial_positions, coalition_state,
-                                     current_state, max_iter, steps, None)
-                finally:
-                    np.random.set_state(saved)
-            else:
-                saved = rng.bit_generator.state
-                rng.bit_generator.state = outer_state
-                try:
-                    return _simulate(self, initial_positions, coalition_state,
-                                     current_state, max_iter, steps, rng)
-                finally:
-                    rng.bit_generator.state = saved
-
-        return value_function
 
 
 # ----------------------------------------------------------------------
@@ -314,8 +293,14 @@ def load_problem(path, clients=None, hubs=None):
     )
 
 
-def solve_exact_by_backtracking(problem, max_clients=12, max_hubs=8):
-    """Backtracking exacto. Solo viable para instancias pequenas."""
+def solve_exact_by_backtracking(problem, max_clients=24, max_hubs=8):
+    """Backtracking exacto con poda min_future + capacidad + D_max.
+
+    Por defecto admite hasta 24 clientes x 8 hubs (instancia "dura"). Para
+    instancias mas grandes pasar overrides explicitos: el costo es exponencial
+    en el peor caso, asi que es responsabilidad del caller no invocarlo en
+    instancias intratables.
+    """
     if problem.n_clients > max_clients or problem.n_hubs > max_hubs:
         return np.nan, None
 
@@ -370,98 +355,40 @@ def solve_exact_by_backtracking(problem, max_clients=12, max_hubs=8):
     return best_value, best_assignment
 
 
-# ----------------------------------------------------------------------
-# Simulacion para Shapley (analoga a la de cec2022.py pero con repair en eval).
-# ----------------------------------------------------------------------
-def _rescale_population_to_diversity(positions, lb, ub, target_diversity):
-    target = float(target_diversity)
-    if not np.isfinite(target) or target <= 0:
-        return positions.copy()
-    current = population_diversity(positions)
-    if not np.isfinite(current) or current <= 1e-12:
-        return positions.copy()
-    centroid = np.mean(positions, axis=0)
-    scale = target / current
-    return np.clip(centroid + (positions - centroid) * scale, lb, ub)
+def with_exact_optimum(problem, max_clients=24, max_hubs=12, verbose=True):
+    """Adjunta el optimum exacto a un TMLAPProblem inmutable.
 
-
-def _coalition_target_diversity(coalition_state, current_state):
-    normalized = float(coalition_state.get("diversity", np.nan))
-    domain_scale = float(current_state.get("diversity_domain_scale", np.nan))
-    if (
-        np.isfinite(normalized) and np.isfinite(domain_scale)
-        and normalized > 0 and domain_scale > 0
-    ):
-        return normalized * domain_scale
-    return float(current_state.get("raw_diversity", np.nan))
-
-
-def _simulate(problem, initial_positions, coalition_state, current_state, max_iter, steps, rng):
-    positions = _rescale_population_to_diversity(
-        initial_positions,
-        problem.lb,
-        problem.ub,
-        _coalition_target_diversity(coalition_state, current_state),
-    )
-    n_agents = positions.shape[0]
-    male_count, female_count, child_count = walrus_role_counts(n_agents)
-
-    best_score = float("inf")
-    best_pos = np.zeros(problem.dim, dtype=float)
-    second_score = float("inf")
-    second_pos = np.zeros(problem.dim, dtype=float)
-    (
-        positions,
-        _fit,
-        best_score,
-        best_pos,
-        second_score,
-        second_pos,
-    ) = evaluate_and_update_leaders(
-        positions, problem.lb, problem.ub, problem.evaluate,
-        best_score, best_pos, second_score, second_pos,
-    )
-    if not np.isfinite(second_score):
-        second_pos = best_pos.copy()
-    gbest_x = np.tile(best_pos, (n_agents, 1))
-
-    start_iter = int(
-        np.clip(round(float(coalition_state.get("iteration", 0))), 0, max_iter - 1)
-    )
-
-    for offset in range(max(1, int(steps))):
-        iteration = min(start_iter + offset, max_iter - 1)
-        if offset == 0:
-            alpha = float(coalition_state.get("alpha", 1 - iteration / max(max_iter, 1)))
-            beta = float(coalition_state.get(
-                "beta",
-                1 - 1 / (1 + np.exp((0.5 * max_iter - iteration) / max(max_iter, 1) * 10)),
-            ))
-            danger = float(coalition_state.get("danger_signal", 0.0))
-            safety = float(coalition_state.get("safety_signal", 0.5))
-            r_signal = r_signal_from_alpha_and_danger(alpha, danger)
-        else:
-            alpha, beta, r_signal, danger, safety = iteration_signals(iteration, max_iter, rng)
-
-        positions = apply_wo_movement(
-            positions, problem.lb, problem.ub, problem.dim, n_agents,
-            male_count, female_count, child_count,
-            best_pos, second_pos, gbest_x,
-            alpha, beta, r_signal, danger, safety, rng=rng,
+    Si el problema ya tiene un optimum numerico finito, lo respeta. Si excede
+    los limites de tractabilidad declarados, devuelve el problema sin cambios
+    (optimum se mantiene en None y los runners reportan ``gap_to_optimum=NaN``).
+    """
+    if not isinstance(problem, TMLAPProblem):
+        return problem
+    existing = problem.optimum
+    if isinstance(existing, (int, float)) and np.isfinite(float(existing)):
+        return problem
+    if problem.n_clients > max_clients or problem.n_hubs > max_hubs:
+        if verbose:
+            print(
+                f"  [exact] saltado: {problem.n_clients}c x {problem.n_hubs}h "
+                f"excede limites ({max_clients}c x {max_hubs}h)",
+                flush=True,
+            )
+        return problem
+    if verbose:
+        print(
+            f"  [exact] resolviendo backtracking ({problem.n_clients}c x {problem.n_hubs}h)...",
+            flush=True,
         )
-        (
-            positions,
-            _fit,
-            best_score,
-            best_pos,
-            second_score,
-            second_pos,
-        ) = evaluate_and_update_leaders(
-            positions, problem.lb, problem.ub, problem.evaluate,
-            best_score, best_pos, second_score, second_pos,
-        )
-        gbest_x = np.tile(best_pos, (n_agents, 1))
-        if not np.isfinite(second_score):
-            second_pos = best_pos.copy()
-
-    return float(best_score)
+    t0 = time.perf_counter()
+    value, _ = solve_exact_by_backtracking(
+        problem, max_clients=max_clients, max_hubs=max_hubs
+    )
+    dt = time.perf_counter() - t0
+    if not np.isfinite(value):
+        if verbose:
+            print(f"  [exact] sin solucion exacta ({dt:.2f}s)", flush=True)
+        return problem
+    if verbose:
+        print(f"  [exact] optimum={value:.6g}  ({dt:.2f}s)", flush=True)
+    return replace(problem, optimum=float(value))

@@ -27,6 +27,7 @@ from .walrus import (
     iteration_signals,
     r_signal_from_alpha_and_danger,
     walrus_role_counts,
+    wo,
 )
 from .halton import halton
 from .levy_flight import levy_flight
@@ -50,4 +51,5 @@ __all__ = [
     "r_signal_from_alpha_and_danger",
     "uniform_population",
     "walrus_role_counts",
+    "wo",
 ]
