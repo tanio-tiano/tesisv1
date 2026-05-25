@@ -59,8 +59,10 @@ def parse_args():
     ap.add_argument("--runs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--modes", type=str, default="base,blind,shap")
-    ap.add_argument("--init-mode", choices=["local_search", "random"], default="local_search",
-                    help="Solo TMLAP: 'random' salta local_search (instancias grandes).")
+    ap.add_argument("--init-mode", choices=["local_search", "random"], default="random",
+                    help="TMLAP: 'random' (default) inicia con repair SIN local_search -> el WO "
+                         "trabaja desde 0 (sin que el inicializador optimice). 'local_search' lo "
+                         "deja optimizar en el init (NO recomendado para analizar el WO).")
     ap.add_argument("--w-fixed", type=float, default=0.5,
                     help="Modo 'wfix': w constante (mutacion parcial fija, SIN SHAP).")
     ap.add_argument("--output", required=True)
@@ -150,6 +152,7 @@ def run_one(problem, mode, args, max_fes, seed):
     n_interventions = 0
     initial_fitness = np.nan
     w_records = []  # traza por explicación SHAP: fes, agente, w, dominante y 6 contribuciones
+    curve = []      # convergencia del WO: (fes, best_score) al inicio de cada iteración
 
     while not budget.exhausted():
         fes_start = budget.total
@@ -162,6 +165,7 @@ def run_one(problem, mode, args, max_fes, seed):
             second_pos = best_pos.copy()
         if not np.isfinite(initial_fitness):
             initial_fitness = float(best_score)
+        curve.append((int(budget.total), float(best_score)))
 
         for i in range(n_agents):
             f = fitness_values[i]
@@ -281,7 +285,7 @@ def run_one(problem, mode, args, max_fes, seed):
         "ram_peak_mb": float(_peak_ram_mb()),
     }
     row.update(budget.as_dict())
-    return row, w_records
+    return row, w_records, curve
 
 
 def main():
@@ -290,17 +294,26 @@ def main():
     problems = make_problems(args)
     out = Path(args.output); (out / "values").mkdir(parents=True, exist_ok=True)
 
-    rows, w_all = [], []
+    rows, w_all, curves_all = [], [], []
     for p_idx, (problem, label) in enumerate(problems):
         print(f"\n=== {label} (dim={problem.dim}) ===", flush=True)
         for run_id in range(1, args.runs + 1):
             seed = int(args.seed + p_idx * 1000 + run_id - 1)   # único por (func,run); compartido entre modos
             for mode in modes:
-                r, wrec = run_one(problem, mode, args, args.max_fes, seed)
+                r, wrec, crv = run_one(problem, mode, args, args.max_fes, seed)
                 r["problem"] = label; r["run_id"] = run_id
                 rows.append(r)
                 for _rec in wrec:
                     w_all.append({"problem": label, "run_id": run_id, "seed": seed, **_rec})
+                if crv:  # curva de convergencia muestreada (~60 puntos) para no inflar
+                    arr = np.asarray(crv, dtype=float)
+                    k = max(1, len(arr) // 60)
+                    samp = arr[::k]
+                    if not np.array_equal(samp[-1], arr[-1]):
+                        samp = np.vstack([samp, arr[-1]])
+                    for fes_v, best_v in samp:
+                        curves_all.append({"problem": label, "run_id": run_id, "mode": mode,
+                                           "fes": int(fes_v), "best_fitness": float(best_v)})
             print(f"  run={run_id:2d} done (seed={seed})", flush=True)
 
     df = pd.DataFrame(rows)
@@ -314,6 +327,9 @@ def main():
         trace = pd.DataFrame(w_all)
         trace = trace[[c for c in cols if c in trace.columns]]
         trace.to_csv(out / "values" / "shap_trace.csv", index=False)
+    if curves_all:
+        # Convergencia del WO (best vs FES), muestreada, por corrida y modo.
+        pd.DataFrame(curves_all).to_csv(out / "values" / "curves.csv", index=False)
 
     # --- Resumen por función (Wilcoxon shap vs blind y shap vs base) ---
     try:
