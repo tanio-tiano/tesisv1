@@ -40,10 +40,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from problems.cec2022 import FUNCTION_IDS as CEC_FUNCTION_IDS
 from problems.factory import parse_problem_spec
 from shap_controller import SHAPFitnessController, improvement_threshold
+from shap_controller.features import FEATURE_BASELINE_DEFAULTS, FEATURE_COLUMNS
 from wo_core.agent_sim import make_value_function_for_agent
 from wo_core.fes import FESBudget, counting_objective
 from wo_core.walrus import (
     apply_wo_movement,
+    apply_wo_movement_single,
     evaluate_and_update_leaders,
     iteration_signals,
     walrus_role_counts,
@@ -98,6 +100,50 @@ def dominant_share(shap_info):
     if total <= 0.0:
         return 1.0  # sin información -> reinit completo (fallback)
     return max(abs_vals) / total
+
+
+def _gbest_profile(eval_shap, controller, positions, fitness_values, lb, ub, dim,
+                   role_counts, best_pos, second_pos, best_score, signal_state,
+                   max_fes, fes_start, rng):
+    """SHAP del GBest -> perfil de cuotas {senal: |SHAP|/Sum|SHAP|}. Gasta 1 explicacion."""
+    gi = int(np.argmin(fitness_values))            # slot temporal para insertar el GBest
+    frozen = positions.copy()
+    frozen[gi, :] = np.asarray(best_pos, dtype=float)
+    vf = make_value_function_for_agent(
+        eval_shap, gi, frozen, lb, ub, dim, role_counts,
+        best_pos, second_pos, signal_state, max_fes, fes_start,
+        controller.shapley_steps, rng=rng,
+    )
+    info = controller.explain_fitness(
+        {**signal_state, "agent_index": gi, "agent_fitness": float(best_score),
+         "fes_since_improve": 0, "fes": 0},
+        value_function=vf,
+    )
+    vals = (info or {}).get("values", {})
+    ab = {f: abs(float(vals.get(f, 0.0))) for f in FEATURE_COLUMNS}
+    tot = sum(ab.values())
+    prof = ({f: 1.0 / len(FEATURE_COLUMNS) for f in FEATURE_COLUMNS} if tot <= 0.0
+            else {f: ab[f] / tot for f in FEATURE_COLUMNS})
+    return prof, info
+
+
+def _reposition_elite(positions, i, profile, signal_state, lb, ub, dim, n_agents,
+                      role_counts, best_pos, second_pos, rng, amp):
+    """Reposiciona al agente i con un paso WO cuyas 6 senales se modulan por el perfil
+    del GBest:  senal' = base + (1 + amp*w_senal)*(senal - base)."""
+    mc, fc, cc = role_counts
+    base = FEATURE_BASELINE_DEFAULTS
+
+    def m(name):
+        return base[name] + (1.0 + amp * profile.get(name, 0.0)) * (signal_state[name] - base[name])
+
+    work = positions.copy()
+    gbest_row = np.asarray(best_pos, dtype=float)
+    return apply_wo_movement_single(
+        work, i, lb, ub, dim, n_agents, mc, fc, cc,
+        best_pos, second_pos, gbest_row,
+        m("alpha"), m("beta"), m("R"), m("danger_signal"), m("safety_signal"), rng=rng,
+    )
 
 
 def _peak_ram_mb():
@@ -189,6 +235,7 @@ def run_one(problem, mode, args, max_fes, seed):
         if mode != "base":
             if mode == "shap":
                 controller.record_state(signal_state, best_score)
+            gbest_profile = None   # perfil del GBest para 'elite' (1 SHAP por iteración, on-demand)
             fes_since = budget.total - last_improve_fes
             order = np.argsort(-fes_since)
             for idx in order:
@@ -232,13 +279,36 @@ def run_one(problem, mode, args, max_fes, seed):
                     w_records.append(_rec)
                 elif mode == "wfix":
                     w = float(args.w_fixed)        # mutacion parcial fija, SIN SHAP
+                elif mode == "elite":
+                    if gbest_profile is None:      # perfil del GBest (1 SHAP por iteración)
+                        if not budget.can_afford(shap_cost):
+                            break
+                        _ts = time.perf_counter()
+                        gbest_profile, _ginfo = _gbest_profile(
+                            eval_shap, controller, positions, fitness_values, lb, ub, dim,
+                            role_counts, best_pos, second_pos, best_score, signal_state,
+                            max_fes, fes_start, rng)
+                        t_shap += time.perf_counter() - _ts
+                        _rec = {"fes": int(budget.total), "agent_index": -1, "w": 0.0,
+                                "dominant_feature": str((_ginfo or {}).get("dominant_feature", "")),
+                                "dominant_value": float((_ginfo or {}).get("dominant_value", 0.0)),
+                                "absolute_pressure": float((_ginfo or {}).get("absolute_pressure", 0.0))}
+                        for _f, _v in ((_ginfo or {}).get("values", {}) or {}).items():
+                            _rec[f"shap_{_f}"] = float(_v)
+                        w_records.append(_rec)   # agent_index=-1 marca el perfil del GBest
+                    w = 1.0                          # placeholder (elite no usa interpolación)
                 else:
                     w = 1.0                         # blind: reinit ciego total
 
                 if budget.exhausted():
                     break
-                uniform_point = lb_arr + (ub_arr - lb_arr) * rng.random(dim)
-                candidate = (1.0 - w) * positions[i, :] + w * uniform_point
+                if mode == "elite":
+                    candidate = _reposition_elite(
+                        positions, i, gbest_profile, signal_state, lb, ub, dim, n_agents,
+                        role_counts, best_pos, second_pos, rng, controller.amplification_factor)
+                else:
+                    uniform_point = lb_arr + (ub_arr - lb_arr) * rng.random(dim)
+                    candidate = (1.0 - w) * positions[i, :] + w * uniform_point
                 candidate = np.clip(candidate, lb_arr, ub_arr)
                 cand_fit = float(eval_interv(candidate))
 
