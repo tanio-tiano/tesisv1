@@ -1,26 +1,30 @@
-"""Ablation B4 — ¿aporta SHAP al REINICIO de los agentes estancados?
+"""Ablation B4 — ¿aporta SHAP al REPOSICIONAMIENTO de los agentes estancados?
+
+Giro metodológico (guía): "aprender del mejor". Se registra el PERFIL de
+contribuciones SHAP del GBest (6 cuotas `w_i = |SHAP_i| / Σ|SHAP|`) y se
+reposiciona a los agentes estancados con un paso WO cuyas 6 señales se MODULAN
+por ese perfil (`señal' = base + (1 + amp·w_i)·(señal − base)`).
 
 Compara 3 brazos con las MISMAS semillas (comparación pareada), bajo el mismo
 MaxFES y el mismo flujo WO/FES:
 
-  * base : WO puro, sin controlador (referencia).
-  * blind: detecta estancamiento (FES, por agente) + reinit ciego  (w = 1).
-  * shap : detecta estancamiento + SHAP por agente + reinit MODULADO (w = dominant_share).
+  * base   : WO puro, sin controlador (referencia para evaluar el impacto, Esp. 4).
+  * exact  : detecta estancamiento (FES, por agente) + perfil del GBest por SHAP
+             EXACTO (2^6 = 64 coaliciones) + reposicionamiento modulado.
+  * kernel : igual que 'exact' pero el perfil del GBest se estima con KernelSHAP
+             (librería ``shap``, KernelExplainer) — para contrastar exacto vs aprox.
 
-La acción de reinicio es una MUTACIÓN modulada (A1 + B4):
+El perfil del GBest se calcula 1 vez por iteración (1 SHAP, compartido por todos
+los estancados de esa iteración). Se registra en ``shap_trace.csv`` con
+``agent_index = -1``.
 
-    x_nuevo = (1 - w) * x_actual + w * (lb + (ub - lb) * rand)
-
-donde w = cuota de contribución de la señal dominante (|SHAP_dom| / Σ|SHAP|).
-En 'blind' w=1 (reinit uniforme total, sin gastar FES en SHAP).
-
-Soporta una función (``cec2022:F12``) o todas (``cec2022:all``). Registra la
-distribución de ``w`` (modo shap) para verificar si degenera a reinit ciego.
+Soporta una función (``cec2022:F12``), todas (``cec2022:all``) o TMLAP
+(``tmlap:3.instancia_dura.txt``).
 
 Uso:
     python experiments/ablation_b4/run_ablation.py --problem cec2022:all \\
-        --dim 10 --agents 30 --max-fes 50000 --runs 30 \\
-        --modes base,blind,shap --output experiments/ablation_b4_allcec
+        --dim 10 --agents 30 --max-fes 50000 --runs 51 \\
+        --modes base,exact,kernel --output experiments/ablation_b4_allcec
 """
 
 from __future__ import annotations
@@ -60,8 +64,9 @@ def parse_args():
     ap.add_argument("--max-fes", type=int, default=50000)
     ap.add_argument("--runs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=1234)
-    ap.add_argument("--modes", type=str, default="base,elite",
-                    help="Configuraciones a correr: 'base' (WO solo) y 'elite' (WO + controlador).")
+    ap.add_argument("--modes", type=str, default="base,exact,kernel",
+                    help="Configuraciones: 'base' (WO solo), 'exact' (WO + perfil GBest por SHAP "
+                         "exacto), 'kernel' (WO + perfil GBest por KernelSHAP).")
     ap.add_argument("--init-mode", choices=["local_search", "random"], default="random",
                     help="TMLAP: 'random' (default) inicia con repair SIN local_search -> el WO "
                          "trabaja desde 0 (sin que el inicializador optimice). 'local_search' lo "
@@ -133,6 +138,45 @@ def _reposition_elite(positions, i, profile, signal_state, lb, ub, dim, n_agents
         best_pos, second_pos, gbest_row,
         m("alpha"), m("beta"), m("R"), m("danger_signal"), m("safety_signal"), rng=rng,
     )
+
+
+def _gbest_profile_kernel(eval_shap, controller, positions, fitness_values, lb, ub, dim,
+                          role_counts, best_pos, second_pos, best_score, signal_state,
+                          max_fes, fes_start, rng, nsamples=100):
+    """Perfil del GBest via KernelSHAP (libreria `shap`, APROXIMACION por muestreo).
+    Misma value function que el exacto (simula el GBest); KernelExplainer estima las
+    contribuciones de las 6 senales. Devuelve (perfil_cuotas, info)."""
+    import shap
+    gi = int(np.argmin(fitness_values))
+    frozen = positions.copy()
+    frozen[gi, :] = np.asarray(best_pos, dtype=float)
+    vf = make_value_function_for_agent(
+        eval_shap, gi, frozen, lb, ub, dim, role_counts,
+        best_pos, second_pos, signal_state, max_fes, fes_start,
+        controller.shapley_steps, rng=rng)
+
+    def f(X):
+        X = np.atleast_2d(np.asarray(X, dtype=float))
+        out = np.empty(X.shape[0], dtype=float)
+        for r in range(X.shape[0]):
+            cs = {FEATURE_COLUMNS[j]: float(X[r, j]) for j in range(len(FEATURE_COLUMNS))}
+            out[r] = float(vf(cs))
+        return out
+
+    background = np.array([[FEATURE_BASELINE_DEFAULTS[c] for c in FEATURE_COLUMNS]], dtype=float)
+    instance = np.array([[float(signal_state[c]) for c in FEATURE_COLUMNS]], dtype=float)
+    explainer = shap.KernelExplainer(f, background)
+    sv = np.asarray(explainer.shap_values(instance, nsamples=nsamples, silent=True)).reshape(-1)
+    sv = sv[:len(FEATURE_COLUMNS)]
+    vals = {FEATURE_COLUMNS[j]: float(sv[j]) for j in range(len(FEATURE_COLUMNS))}
+    ab = {c: abs(vals[c]) for c in FEATURE_COLUMNS}
+    tot = sum(ab.values())
+    prof = ({c: 1.0 / len(FEATURE_COLUMNS) for c in FEATURE_COLUMNS} if tot <= 0.0
+            else {c: ab[c] / tot for c in FEATURE_COLUMNS})
+    dom = max(vals, key=lambda k: abs(vals[k]))
+    info = {"values": vals, "dominant_feature": dom, "dominant_value": vals[dom],
+            "absolute_pressure": tot}
+    return prof, info
 
 
 def _peak_ram_mb():
@@ -221,8 +265,8 @@ def run_one(problem, mode, args, max_fes, seed):
             "danger_signal": float(danger_signal), "safety_signal": float(safety_signal),
         }
 
-        if mode == "elite":
-            gbest_profile = None   # perfil del GBest (1 SHAP por iteración, on-demand)
+        if mode in ("exact", "kernel"):
+            gbest_profile = None   # perfil del GBest (1 explicación por iteración, on-demand)
             fes_since = budget.total - last_improve_fes
             order = np.argsort(-fes_since)
             for idx in order:
@@ -242,9 +286,10 @@ def run_one(problem, mode, args, max_fes, seed):
                 if not budget.can_afford(shap_cost):
                     break
 
-                if gbest_profile is None:      # perfil del GBest (1 SHAP por iteración)
+                if gbest_profile is None:      # perfil del GBest (1 explicación por iteración)
                     _ts = time.perf_counter()
-                    gbest_profile, _ginfo = _gbest_profile(
+                    _profile_fn = _gbest_profile_kernel if mode == "kernel" else _gbest_profile
+                    gbest_profile, _ginfo = _profile_fn(
                         eval_shap, controller, positions, fitness_values, lb, ub, dim,
                         role_counts, best_pos, second_pos, best_score, signal_state,
                         max_fes, fes_start, rng)
@@ -352,31 +397,34 @@ def main():
         from scipy.stats import wilcoxon
     except Exception:
         wilcoxon = None
-    print("\n" + "=" * 72)
+    print("\n" + "=" * 88)
     print(f"ABLATION {args.problem} | MaxFES={args.max_fes} | runs={args.runs}")
-    print("=" * 72)
-    print(f"{'instancia':26s} {'base':>11s} {'elite':>11s} {'elite<base':>11s} {'p(elite-base)':>14s}")
+    print("=" * 88)
+    print(f"{'instancia':24s} {'base':>10s} {'exact':>10s} {'kernel':>10s} "
+          f"{'p(exact-base)':>14s} {'p(kernel-base)':>15s}")
     summary_rows = []
     for label in df["problem"].unique():
         sub = df[df["problem"] == label]
         piv = sub.pivot(index="run_id", columns="mode", values="final_fitness")
         means = {m: piv[m].mean() for m in modes if m in piv}
-        line = f"{label:26s} " + " ".join(
-            f"{means.get(m, float('nan')):11.3f}" for m in ["base", "elite"])
-        rec = {"problem": label, "mean_base": means.get("base", np.nan),
-               "mean_elite": means.get("elite", np.nan)}
-        if "elite" in piv and "base" in piv:
-            wins = int((piv["elite"] < piv["base"]).sum())
-            line += f" {wins:5d}/{len(piv):<5d}"
-            rec["elite_wins_vs_base"] = wins
-            rec["n"] = int(len(piv))
-            if wilcoxon is not None:
-                try:
-                    _, p = wilcoxon(piv["elite"], piv["base"])
-                    line += f" {p:14.4f}"
-                    rec["p_elite_vs_base"] = float(p)
-                except Exception:
-                    line += f" {'--':>14s}"
+        line = f"{label:24s} " + " ".join(
+            f"{means.get(m, float('nan')):10.3f}" for m in ["base", "exact", "kernel"])
+        rec = {"problem": label, "n": int(len(piv)),
+               **{f"mean_{m}": means.get(m, np.nan) for m in ["base", "exact", "kernel"]}}
+        for m, wdt in (("exact", 14), ("kernel", 15)):
+            if m in piv and "base" in piv:
+                rec[f"{m}_wins_vs_base"] = int((piv[m] < piv["base"]).sum())
+                if wilcoxon is not None:
+                    try:
+                        _, p = wilcoxon(piv[m], piv["base"])
+                        rec[f"p_{m}_vs_base"] = float(p)
+                        line += f" {p:{wdt}.4f}"
+                    except Exception:
+                        line += f" {'--':>{wdt}s}"
+                else:
+                    line += f" {'--':>{wdt}s}"
+            else:
+                line += f" {'--':>{wdt}s}"
         summary_rows.append(rec)
         print(line, flush=True)
     pd.DataFrame(summary_rows).to_csv(out / "values" / "ablation_by_function.csv", index=False)
