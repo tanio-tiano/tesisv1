@@ -98,9 +98,21 @@ def dominant_share(shap_info):
     return max(abs_vals) / total
 
 
+def _peak_ram_mb():
+    """RAM pico del proceso (MB). ru_maxrss: bytes en macOS, KB en Linux; NaN si no aplica."""
+    try:
+        import resource
+        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return ru / (1024 * 1024) if sys.platform == "darwin" else ru / 1024
+    except Exception:
+        return float("nan")
+
+
 def run_one(problem, mode, args, max_fes, seed):
     rng = np.random.default_rng(seed)
     start = time.perf_counter()
+    t_init = 0.0   # tiempo de inicializacion (s)
+    t_shap = 0.0   # tiempo acumulado en explicaciones SHAP (s)
     n_agents = args.agents
     dim, lb, ub = problem.dim, problem.lb, problem.ub
     lb_arr, ub_arr = np.asarray(lb, dtype=float), np.asarray(ub, dtype=float)
@@ -110,6 +122,7 @@ def run_one(problem, mode, args, max_fes, seed):
     eval_shap = counting_objective(problem.evaluate, budget, "shap")
     eval_interv = counting_objective(problem.evaluate, budget, "intervention")
 
+    _t0 = time.perf_counter()
     if getattr(problem, "family", None) == "tmlap":
         positions = problem.initial_population(
             n_agents, rng, init_mode=args.init_mode,
@@ -117,6 +130,7 @@ def run_one(problem, mode, args, max_fes, seed):
         )
     else:
         positions = problem.initial_population(n_agents, rng)
+    t_init = time.perf_counter() - _t0
     best_pos = np.zeros(dim); second_pos = np.zeros(dim)
     best_score = float("inf"); second_score = float("inf")
     male_count, female_count, child_count = walrus_role_counts(n_agents)
@@ -135,7 +149,7 @@ def run_one(problem, mode, args, max_fes, seed):
     last_action_fes = {}
     n_interventions = 0
     initial_fitness = np.nan
-    w_records = []  # (w, dominant_feature) por intervención SHAP
+    w_records = []  # traza por explicación SHAP: fes, agente, w, dominante y 6 contribuciones
 
     while not budget.exhausted():
         fes_start = budget.total
@@ -196,14 +210,22 @@ def run_one(problem, mode, args, max_fes, seed):
                         best_pos, second_pos, signal_state, max_fes, fes_start,
                         controller.shapley_steps, rng=rng,
                     )
+                    _ts = time.perf_counter()
                     shap_info = controller.explain_fitness(
                         {**signal_state, "agent_index": i,
                          "agent_fitness": float(fitness_values[i]),
                          "fes_since_improve": fsi, "fes": int(budget.total)},
                         value_function=value_fn,
                     )
+                    t_shap += time.perf_counter() - _ts
                     w = dominant_share(shap_info)
-                    w_records.append((float(w), str(shap_info.get("dominant_feature", ""))))
+                    _rec = {"fes": int(budget.total), "agent_index": int(i), "w": float(w),
+                            "dominant_feature": str(shap_info.get("dominant_feature", "")),
+                            "dominant_value": float(shap_info.get("dominant_value", 0.0)),
+                            "absolute_pressure": float(shap_info.get("absolute_pressure", 0.0))}
+                    for _f, _v in (shap_info.get("values", {}) or {}).items():
+                        _rec[f"shap_{_f}"] = float(_v)
+                    w_records.append(_rec)
                 elif mode == "wfix":
                     w = float(args.w_fixed)        # mutacion parcial fija, SIN SHAP
                 else:
@@ -244,7 +266,7 @@ def run_one(problem, mode, args, max_fes, seed):
     optimum_f = float(optimum) if optimum is not None and np.isfinite(float(optimum)) else np.nan
     gap = float(best_score - optimum_f) if np.isfinite(optimum_f) else np.nan
 
-    ws = np.array([w for w, _ in w_records], dtype=float)
+    ws = np.array([r["w"] for r in w_records], dtype=float)
     row = {
         "mode": mode, "seed": int(seed),
         "initial_fitness": float(initial_fitness), "final_fitness": float(best_score),
@@ -254,6 +276,9 @@ def run_one(problem, mode, args, max_fes, seed):
         "w_min": float(ws.min()) if ws.size else np.nan,
         "w_max": float(ws.max()) if ws.size else np.nan,
         "elapsed_seconds": float(elapsed),
+        "t_init_seconds": float(t_init),
+        "t_shap_seconds": float(t_shap),
+        "ram_peak_mb": float(_peak_ram_mb()),
     }
     row.update(budget.as_dict())
     return row, w_records
@@ -274,15 +299,21 @@ def main():
                 r, wrec = run_one(problem, mode, args, args.max_fes, seed)
                 r["problem"] = label; r["run_id"] = run_id
                 rows.append(r)
-                for w, feat in wrec:
-                    w_all.append({"problem": label, "run_id": run_id, "seed": seed,
-                                  "w": w, "dominant_feature": feat})
+                for _rec in wrec:
+                    w_all.append({"problem": label, "run_id": run_id, "seed": seed, **_rec})
             print(f"  run={run_id:2d} done (seed={seed})", flush=True)
 
     df = pd.DataFrame(rows)
     df.to_csv(out / "values" / "ablation_summary.csv", index=False)
     if w_all:
-        pd.DataFrame(w_all).to_csv(out / "values" / "w_values.csv", index=False)
+        # Traza SHAP completa por explicacion: FES (momento) + 6 contribuciones + dominante.
+        cols = ["problem", "run_id", "seed", "fes", "agent_index", "w",
+                "dominant_feature", "dominant_value", "absolute_pressure",
+                "shap_alpha", "shap_beta", "shap_A", "shap_R",
+                "shap_danger_signal", "shap_safety_signal"]
+        trace = pd.DataFrame(w_all)
+        trace = trace[[c for c in cols if c in trace.columns]]
+        trace.to_csv(out / "values" / "shap_trace.csv", index=False)
 
     # --- Resumen por función (Wilcoxon shap vs blind y shap vs base) ---
     try:
