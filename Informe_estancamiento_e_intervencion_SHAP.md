@@ -2,7 +2,7 @@
 
 **Proyecto:** Walrus Optimizer (WO) con controlador SHAP por agente
 **Fecha:** 2026-05-22
-**Fuente de datos:** `experiments/test_report/` (telemetría real) y `experiments/F12_estancamiento/`
+**Fuente de datos:** corridas WO base/SHAP sobre CEC2022 y TMLAP (regenerables con `runners/run_wo_base.py` y `runners/run_wo_shap.py`) y el caso `experiments/F12_estancamiento/`
 **Alcance de esta corrida:** 5 corridas por problema · MaxFES = 50.000 · CEC2022 (F1–F12, dim 10) + TMLAP (simple/mediana/dura)
 
 > **Aviso de validez.** Las cifras son **preliminares**: 5 corridas y un solo MaxFES (50.000), no el protocolo completo (51 corridas × {5·10³, 5·10⁴, 5·10⁵, 5·10⁶} con Friedman/Wilcoxon). Sirven para auditar el **comportamiento** del controlador, no para concluir superioridad estadística.
@@ -228,8 +228,11 @@ Observaciones:
 
 ## Apéndice B — Procedencia de los datos
 
-- Telemetría: `experiments/test_report/{cec,tmlap_simple,tmlap_mediana,tmlap_dura}/shap/values/`
-  (`controller_events.csv`, `controller_non_events.csv`, `shap_values.csv`, `summary.csv`).
-- Script de agregación: `experiments/test_report/_stats_estancamiento.py`.
+> Nota: los outputs originales (`experiments/test_report/`) se eliminaron en una limpieza
+> posterior del repositorio; las cifras de este informe quedan registradas en el texto.
+> Para regenerarlos: `runners/run_wo_base.py` (WO base) y `runners/run_wo_shap.py` (WO+SHAP)
+> sobre CEC2022 y las instancias TMLAP.
+
 - Caso F12: `experiments/F12_estancamiento/` (corrida + `plot_estancamiento.py` + PNG).
+- Ablation de impacto: `experiments/ablation_b4/run_ablation.py` (resultados en `experiments/ablation_b4*/values/`).
 - Núcleo: `runners/run_wo_shap.py`, `shap_controller/controller.py`, `wo_core/agent_sim.py`, `shap_controller/profiles.py`.
