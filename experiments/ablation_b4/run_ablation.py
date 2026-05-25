@@ -60,13 +60,12 @@ def parse_args():
     ap.add_argument("--max-fes", type=int, default=50000)
     ap.add_argument("--runs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=1234)
-    ap.add_argument("--modes", type=str, default="base,blind,shap")
+    ap.add_argument("--modes", type=str, default="base,elite",
+                    help="Configuraciones a correr: 'base' (WO solo) y 'elite' (WO + controlador).")
     ap.add_argument("--init-mode", choices=["local_search", "random"], default="random",
                     help="TMLAP: 'random' (default) inicia con repair SIN local_search -> el WO "
                          "trabaja desde 0 (sin que el inicializador optimice). 'local_search' lo "
                          "deja optimizar en el init (NO recomendado para analizar el WO).")
-    ap.add_argument("--w-fixed", type=float, default=0.5,
-                    help="Modo 'wfix': w constante (mutacion parcial fija, SIN SHAP).")
     ap.add_argument("--output", required=True)
     return ap.parse_args()
 
@@ -90,16 +89,6 @@ def make_problems(args):
         return [(p, getattr(p, "name", "tmlap"))]
     problem = parse_problem_spec(spec, dim=args.dim)
     return [(problem, f"F{getattr(problem, 'function_id', '?')}")]
-
-
-def dominant_share(shap_info):
-    """Cuota de la señal dominante: |SHAP_dom| / Σ|SHAP_j| (en [1/6, 1])."""
-    values = (shap_info or {}).get("values", {})
-    abs_vals = [abs(float(v)) for v in values.values()]
-    total = sum(abs_vals)
-    if total <= 0.0:
-        return 1.0  # sin información -> reinit completo (fallback)
-    return max(abs_vals) / total
 
 
 def _gbest_profile(eval_shap, controller, positions, fitness_values, lb, ub, dim,
@@ -232,10 +221,8 @@ def run_one(problem, mode, args, max_fes, seed):
             "danger_signal": float(danger_signal), "safety_signal": float(safety_signal),
         }
 
-        if mode != "base":
-            if mode == "shap":
-                controller.record_state(signal_state, best_score)
-            gbest_profile = None   # perfil del GBest para 'elite' (1 SHAP por iteración, on-demand)
+        if mode == "elite":
+            gbest_profile = None   # perfil del GBest (1 SHAP por iteración, on-demand)
             fes_since = budget.total - last_improve_fes
             order = np.argsort(-fes_since)
             for idx in order:
@@ -252,63 +239,27 @@ def run_one(problem, mode, args, max_fes, seed):
                 last = last_action_fes.get(i)
                 if last is not None and budget.total - last < cooldown:
                     continue
-                if mode == "shap" and not budget.can_afford(shap_cost):
+                if not budget.can_afford(shap_cost):
                     break
 
-                if mode == "shap":
-                    value_fn = make_value_function_for_agent(
-                        eval_shap, i, positions, lb, ub, dim, role_counts,
-                        best_pos, second_pos, signal_state, max_fes, fes_start,
-                        controller.shapley_steps, rng=rng,
-                    )
+                if gbest_profile is None:      # perfil del GBest (1 SHAP por iteración)
                     _ts = time.perf_counter()
-                    shap_info = controller.explain_fitness(
-                        {**signal_state, "agent_index": i,
-                         "agent_fitness": float(fitness_values[i]),
-                         "fes_since_improve": fsi, "fes": int(budget.total)},
-                        value_function=value_fn,
-                    )
+                    gbest_profile, _ginfo = _gbest_profile(
+                        eval_shap, controller, positions, fitness_values, lb, ub, dim,
+                        role_counts, best_pos, second_pos, best_score, signal_state,
+                        max_fes, fes_start, rng)
                     t_shap += time.perf_counter() - _ts
-                    w = dominant_share(shap_info)
-                    _rec = {"fes": int(budget.total), "agent_index": int(i), "w": float(w),
-                            "dominant_feature": str(shap_info.get("dominant_feature", "")),
-                            "dominant_value": float(shap_info.get("dominant_value", 0.0)),
-                            "absolute_pressure": float(shap_info.get("absolute_pressure", 0.0))}
-                    for _f, _v in (shap_info.get("values", {}) or {}).items():
+                    _rec = {"fes": int(budget.total), "agent_index": -1,
+                            "dominant_feature": str((_ginfo or {}).get("dominant_feature", "")),
+                            "dominant_value": float((_ginfo or {}).get("dominant_value", 0.0)),
+                            "absolute_pressure": float((_ginfo or {}).get("absolute_pressure", 0.0))}
+                    for _f, _v in ((_ginfo or {}).get("values", {}) or {}).items():
                         _rec[f"shap_{_f}"] = float(_v)
-                    w_records.append(_rec)
-                elif mode == "wfix":
-                    w = float(args.w_fixed)        # mutacion parcial fija, SIN SHAP
-                elif mode == "elite":
-                    if gbest_profile is None:      # perfil del GBest (1 SHAP por iteración)
-                        if not budget.can_afford(shap_cost):
-                            break
-                        _ts = time.perf_counter()
-                        gbest_profile, _ginfo = _gbest_profile(
-                            eval_shap, controller, positions, fitness_values, lb, ub, dim,
-                            role_counts, best_pos, second_pos, best_score, signal_state,
-                            max_fes, fes_start, rng)
-                        t_shap += time.perf_counter() - _ts
-                        _rec = {"fes": int(budget.total), "agent_index": -1, "w": 0.0,
-                                "dominant_feature": str((_ginfo or {}).get("dominant_feature", "")),
-                                "dominant_value": float((_ginfo or {}).get("dominant_value", 0.0)),
-                                "absolute_pressure": float((_ginfo or {}).get("absolute_pressure", 0.0))}
-                        for _f, _v in ((_ginfo or {}).get("values", {}) or {}).items():
-                            _rec[f"shap_{_f}"] = float(_v)
-                        w_records.append(_rec)   # agent_index=-1 marca el perfil del GBest
-                    w = 1.0                          # placeholder (elite no usa interpolación)
-                else:
-                    w = 1.0                         # blind: reinit ciego total
+                    w_records.append(_rec)   # agent_index=-1 marca el perfil del GBest
 
-                if budget.exhausted():
-                    break
-                if mode == "elite":
-                    candidate = _reposition_elite(
-                        positions, i, gbest_profile, signal_state, lb, ub, dim, n_agents,
-                        role_counts, best_pos, second_pos, rng, controller.amplification_factor)
-                else:
-                    uniform_point = lb_arr + (ub_arr - lb_arr) * rng.random(dim)
-                    candidate = (1.0 - w) * positions[i, :] + w * uniform_point
+                candidate = _reposition_elite(
+                    positions, i, gbest_profile, signal_state, lb, ub, dim, n_agents,
+                    role_counts, best_pos, second_pos, rng, controller.amplification_factor)
                 candidate = np.clip(candidate, lb_arr, ub_arr)
                 cand_fit = float(eval_interv(candidate))
 
@@ -340,15 +291,10 @@ def run_one(problem, mode, args, max_fes, seed):
     optimum_f = float(optimum) if optimum is not None and np.isfinite(float(optimum)) else np.nan
     gap = float(best_score - optimum_f) if np.isfinite(optimum_f) else np.nan
 
-    ws = np.array([r["w"] for r in w_records], dtype=float)
     row = {
         "mode": mode, "seed": int(seed),
         "initial_fitness": float(initial_fitness), "final_fitness": float(best_score),
         "optimum": optimum_f, "gap": gap, "n_interventions": int(n_interventions),
-        "w_mean": float(ws.mean()) if ws.size else np.nan,
-        "w_median": float(np.median(ws)) if ws.size else np.nan,
-        "w_min": float(ws.min()) if ws.size else np.nan,
-        "w_max": float(ws.max()) if ws.size else np.nan,
         "elapsed_seconds": float(elapsed),
         "t_init_seconds": float(t_init),
         "t_shap_seconds": float(t_shap),
@@ -390,7 +336,7 @@ def main():
     df.to_csv(out / "values" / "ablation_summary.csv", index=False)
     if w_all:
         # Traza SHAP completa por explicacion: FES (momento) + 6 contribuciones + dominante.
-        cols = ["problem", "run_id", "seed", "fes", "agent_index", "w",
+        cols = ["problem", "run_id", "seed", "fes", "agent_index",
                 "dominant_feature", "dominant_value", "absolute_pressure",
                 "shap_alpha", "shap_beta", "shap_A", "shap_R",
                 "shap_danger_signal", "shap_safety_signal"]
@@ -401,51 +347,39 @@ def main():
         # Convergencia del WO (best vs FES), muestreada, por corrida y modo.
         pd.DataFrame(curves_all).to_csv(out / "values" / "curves.csv", index=False)
 
-    # --- Resumen por función (Wilcoxon shap vs blind y shap vs base) ---
+    # --- Resumen por instancia (Wilcoxon pareado: elite vs base) ---
     try:
         from scipy.stats import wilcoxon
     except Exception:
         wilcoxon = None
-    print("\n" + "=" * 78)
+    print("\n" + "=" * 72)
     print(f"ABLATION {args.problem} | MaxFES={args.max_fes} | runs={args.runs}")
-    print("=" * 78)
-    hdr = f"{'func':5s} {'base':>11s} {'blind':>11s} {'shap':>11s} {'shap<blind':>11s} {'p(s vs b)':>10s} {'p(s vs base)':>12s} {'w_med':>7s}"
-    print(hdr)
+    print("=" * 72)
+    print(f"{'instancia':26s} {'base':>11s} {'elite':>11s} {'elite<base':>11s} {'p(elite-base)':>14s}")
     summary_rows = []
     for label in df["problem"].unique():
         sub = df[df["problem"] == label]
         piv = sub.pivot(index="run_id", columns="mode", values="final_fitness")
         means = {m: piv[m].mean() for m in modes if m in piv}
-        line = f"{label:5s} " + " ".join(
-            f"{means.get(m, float('nan')):11.3f}" for m in ["base", "blind", "shap"])
-        rec = {"problem": label, **{f"mean_{m}": means.get(m, np.nan) for m in ["base", "blind", "shap"]}}
-        if "shap" in piv and "blind" in piv:
-            wins = int((piv["shap"] < piv["blind"]).sum())
+        line = f"{label:26s} " + " ".join(
+            f"{means.get(m, float('nan')):11.3f}" for m in ["base", "elite"])
+        rec = {"problem": label, "mean_base": means.get("base", np.nan),
+               "mean_elite": means.get("elite", np.nan)}
+        if "elite" in piv and "base" in piv:
+            wins = int((piv["elite"] < piv["base"]).sum())
             line += f" {wins:5d}/{len(piv):<5d}"
-            rec["shap_wins_vs_blind"] = wins; rec["n"] = len(piv)
+            rec["elite_wins_vs_base"] = wins
+            rec["n"] = int(len(piv))
             if wilcoxon is not None:
                 try:
-                    _, p_sb = wilcoxon(piv["shap"], piv["blind"]); line += f" {p_sb:10.3f}"; rec["p_shap_blind"] = p_sb
+                    _, p = wilcoxon(piv["elite"], piv["base"])
+                    line += f" {p:14.4f}"
+                    rec["p_elite_vs_base"] = float(p)
                 except Exception:
-                    line += f" {'--':>10s}"
-            if "base" in piv and wilcoxon is not None:
-                try:
-                    _, p_s0 = wilcoxon(piv["shap"], piv["base"]); line += f" {p_s0:12.3f}"; rec["p_shap_base"] = p_s0
-                except Exception:
-                    line += f" {'--':>12s}"
-        wmed = sub[sub["mode"] == "shap"]["w_median"].median()
-        line += f" {wmed:7.3f}"; rec["w_median"] = wmed
+                    line += f" {'--':>14s}"
         summary_rows.append(rec)
         print(line, flush=True)
     pd.DataFrame(summary_rows).to_csv(out / "values" / "ablation_by_function.csv", index=False)
-
-    # Distribución global de w (modo shap)
-    if w_all:
-        wv = pd.DataFrame(w_all)["w"]
-        print(f"\nDistribución global de w (modo shap, n={len(wv)}): "
-              f"media={wv.mean():.3f} mediana={wv.median():.3f} "
-              f"p10={wv.quantile(.10):.3f} p90={wv.quantile(.90):.3f} "
-              f"frac(w>=0.95)={(wv >= 0.95).mean():.2f}")
     print(f"\nCSV: {out / 'values'}")
 
 
