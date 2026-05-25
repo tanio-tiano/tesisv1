@@ -21,7 +21,7 @@ fi
 
 nohup python experiments/ablation_b4/run_ablation.py \
   --problem "tmlap:3.instancia_dura.txt" --agents 30 --max-fes "$MAXFES" \
-  --runs "$RUNS" --modes base,exact,kernel \
+  --runs "$RUNS" --modes base,exact \
   --init-mode random --output "$OUT" \
   > "$LOG" 2>&1 &
 

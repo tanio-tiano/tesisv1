@@ -64,9 +64,10 @@ def parse_args():
     ap.add_argument("--max-fes", type=int, default=50000)
     ap.add_argument("--runs", type=int, default=30)
     ap.add_argument("--seed", type=int, default=1234)
-    ap.add_argument("--modes", type=str, default="base,exact,kernel",
+    ap.add_argument("--modes", type=str, default="base,exact",
                     help="Configuraciones: 'base' (WO solo), 'exact' (WO + perfil GBest por SHAP "
-                         "exacto), 'kernel' (WO + perfil GBest por KernelSHAP).")
+                         "exacto, SIN dependencias extra), 'kernel' (WO + perfil GBest por "
+                         "KernelSHAP, requiere la libreria 'shap' -> usar solo en local).")
     ap.add_argument("--init-mode", choices=["local_search", "random"], default="random",
                     help="TMLAP: 'random' (default) inicia con repair SIN local_search -> el WO "
                          "trabaja desde 0 (sin que el inicializador optimice). 'local_search' lo "
@@ -352,6 +353,13 @@ def run_one(problem, mode, args, max_fes, seed):
 def main():
     args = parse_args()
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    if "kernel" in modes:   # red de seguridad: sin la libreria 'shap' se omite kernel (no crashea)
+        try:
+            import shap  # noqa: F401
+        except Exception:
+            print("[aviso] modo 'kernel' omitido: falta la libreria 'shap' "
+                  "(pip install shap). Se ejecutan los demas modos.", flush=True)
+            modes = [m for m in modes if m != "kernel"]
     problems = make_problems(args)
     out = Path(args.output); (out / "values").mkdir(parents=True, exist_ok=True)
 
@@ -392,39 +400,42 @@ def main():
         # Convergencia del WO (best vs FES), muestreada, por corrida y modo.
         pd.DataFrame(curves_all).to_csv(out / "values" / "curves.csv", index=False)
 
-    # --- Resumen por instancia (Wilcoxon pareado: elite vs base) ---
+    # --- Resumen por instancia (Wilcoxon pareado: cada modo vs base) ---
     try:
         from scipy.stats import wilcoxon
     except Exception:
         wilcoxon = None
+    show_modes = [m for m in modes]                       # solo los modos realmente corridos
+    treat_modes = [m for m in show_modes if m != "base"]  # modos comparados contra base
     print("\n" + "=" * 88)
     print(f"ABLATION {args.problem} | MaxFES={args.max_fes} | runs={args.runs}")
     print("=" * 88)
-    print(f"{'instancia':24s} {'base':>10s} {'exact':>10s} {'kernel':>10s} "
-          f"{'p(exact-base)':>14s} {'p(kernel-base)':>15s}")
+    header = f"{'instancia':24s} " + " ".join(f"{m:>10s}" for m in show_modes)
+    header += " " + " ".join(f"{f'p({m}-base)':>14s}" for m in treat_modes)
+    print(header)
     summary_rows = []
     for label in df["problem"].unique():
         sub = df[df["problem"] == label]
         piv = sub.pivot(index="run_id", columns="mode", values="final_fitness")
-        means = {m: piv[m].mean() for m in modes if m in piv}
+        means = {m: piv[m].mean() for m in show_modes if m in piv}
         line = f"{label:24s} " + " ".join(
-            f"{means.get(m, float('nan')):10.3f}" for m in ["base", "exact", "kernel"])
+            f"{means.get(m, float('nan')):10.3f}" for m in show_modes)
         rec = {"problem": label, "n": int(len(piv)),
-               **{f"mean_{m}": means.get(m, np.nan) for m in ["base", "exact", "kernel"]}}
-        for m, wdt in (("exact", 14), ("kernel", 15)):
+               **{f"mean_{m}": means.get(m, np.nan) for m in show_modes}}
+        for m in treat_modes:
             if m in piv and "base" in piv:
                 rec[f"{m}_wins_vs_base"] = int((piv[m] < piv["base"]).sum())
                 if wilcoxon is not None:
                     try:
                         _, p = wilcoxon(piv[m], piv["base"])
                         rec[f"p_{m}_vs_base"] = float(p)
-                        line += f" {p:{wdt}.4f}"
+                        line += f" {p:14.4f}"
                     except Exception:
-                        line += f" {'--':>{wdt}s}"
+                        line += f" {'--':>14s}"
                 else:
-                    line += f" {'--':>{wdt}s}"
+                    line += f" {'--':>14s}"
             else:
-                line += f" {'--':>{wdt}s}"
+                line += f" {'--':>14s}"
         summary_rows.append(rec)
         print(line, flush=True)
     pd.DataFrame(summary_rows).to_csv(out / "values" / "ablation_by_function.csv", index=False)
