@@ -19,9 +19,7 @@ Metaheurística poblacional de **N agentes** (roles macho/hembra/cría) con **4 
 ## 3. Régimen experimental
 
 - **Criterio de parada: MaxFES** (protocolo: 51 corridas; MaxFES ∈ {5·10³, 5·10⁴, 5·10⁵, 5·10⁶}; comparación con Friedman/Wilcoxon).
-- **Inicialización — decisión metodológica clave:** para *analizar el WO*, el inicializador **no debe optimizar**; el WO debe trabajar **desde cero**.
-  - **CEC2022:** muestreo **uniforme** aleatorio en [lb,ub].
-  - **TMLAP:** `init_mode=random` → solo `repair` (asegura **factibilidad**, obligatoria por las restricciones) **sin** `local_search`. *Se descartó `local_search` en el init porque optimizaba por el WO y sesgaba la evaluación (de hecho resolvía por sí solo las instancias pequeñas).*
+- **Inicialización:** la población se inicializa **desde cero** y es el WO quien realiza toda la optimización. En CEC2022, muestreo **uniforme** aleatorio en [lb,ub]; en TMLAP, una **asignación factible aleatoria** (la factibilidad es obligatoria por las restricciones del problema).
 - **Contabilidad de FES:** toda evaluación de la función objetivo se descuenta del MaxFES global, separada en buckets: `search`, `shap`, `intervention`, `init`.
 
 ## 4. Detección de estancamiento
@@ -70,11 +68,11 @@ Metaheurística poblacional de **N agentes** (roles macho/hembra/cría) con **4 
 
 - **Calidad:** con la muestra correcta (**51 corridas**), SHAP **no mejora la calidad de forma significativa** (TMLAP dura: Friedman p≈0.49; CEC2022: p≈0.075). *El resultado "significativo" con 30 corridas era un **falso positivo** — esto valida por qué el protocolo exige 51 corridas.*
 - **Interpretabilidad:** la traza muestra **qué señal explica el estancamiento y que difiere por problema**: `danger_signal`/`alpha` dominan en TMLAP, `safety_signal` en CEC; la señal `A` no contribuye.
-- **WO desde 0 (en consolidación):** con `init_mode=random`, el WO trabaja de verdad (mejora ≈30 en la dura, vs ≈16 cuando el `local_search` ayudaba); la corrida de confirmación de 51 runs está finalizando.
+- **WO desde 0 (en consolidación):** el WO realiza toda la optimización (mejora ≈30 en la instancia dura); la corrida de confirmación de 51 corridas está finalizando.
 
 ## 9. Limitaciones
 
-- **Benchmark TMLAP:** las instancias pequeñas son triviales (el `repair`/init ya alcanza el óptimo); la grande (1000×500) es **computacionalmente inviable** (~25 días para 51 corridas con MaxFES=50.000); solo la **dura** ejercita realmente al WO.
+- **Benchmark TMLAP:** las instancias pequeñas son triviales (su óptimo se alcanza sin esfuerzo de búsqueda); la grande (1000×500) es **computacionalmente inviable** (~25 días para 51 corridas con MaxFES=50.000); solo la **dura** ejercita realmente al WO.
 - **`w` degenera a ~1** la mayor parte del tiempo → el reinicio modulado ≈ reinicio ciego (razón mecánica de la ausencia de efecto).
 - Resultados con MaxFES=50.000 (1 de los 4 del protocolo) y dim 10 en CEC.
 
