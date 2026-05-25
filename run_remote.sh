@@ -22,7 +22,7 @@ fi
 nohup python experiments/ablation_b4/run_ablation.py \
   --problem "tmlap:3.instancia_dura.txt" --agents 30 --max-fes "$MAXFES" \
   --runs "$RUNS" --modes base,blind,shap,wfix --w-fixed 0.5 \
-  --init-mode local_search --output "$OUT" \
+  --init-mode random --output "$OUT" \
   > "$LOG" 2>&1 &
 
 echo "Lanzado PID $!  ->  log: $LOG  ->  salida: $OUT/values/"
