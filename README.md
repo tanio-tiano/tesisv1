@@ -1,23 +1,27 @@
 # Walrus Optimizer + Controlador SHAP
 
 Implementacion unica del Walrus Optimizer (Han et al. 2024) con un controlador
-SHAP on-line aplicable a cualquier problema que cumpla el contrato ``WOProblem``.
-Hoy hay dos adaptadores: CEC 2022 (12 funciones continuas) y TMLAP (asignacion
-discreta de clientes a hubs).
+**SHAP por agente** on-line, aplicable a cualquier problema que cumpla el contrato
+`WOProblem`. Hoy hay dos adaptadores: CEC 2022 (12 funciones continuas) y TMLAP
+(asignacion discreta de clientes a hubs).
+
+El criterio de parada es **MaxFES** y la comparacion es una **ablacion pareada
+`base` vs `shap`** (misma semilla por corrida) corrida por un **unico runner**.
 
 ## Estructura
 
 ```
 W.O Python/
 ├── wo_core/                ← dinamica WO unica (paper Han et al. 2024)
-│   ├── walrus.py           apply_wo_movement, walrus_role_counts, signals, ...
+│   ├── walrus.py           apply_wo_movement, apply_wo_movement_single, signals, role_counts
+│   ├── agent_sim.py        value function que simula UN agente (para SHAP por agente)
 │   ├── halton.py, levy_flight.py, initialization.py, diversity.py
 │
-├── shap_controller/        ← controlador SHAP exacto + politica + cooldowns
-│   ├── controller.py       SHAPFitnessController
-│   ├── profiles.py         ControllerProfile / PROFILE_DEFAULTS (soft/medium/hard)
-│   ├── features.py         FEATURE_COLUMNS, baselines
-│   ├── actions.py          partial_restart, random_reinjection (+ modos)
+├── shap_controller/        ← controlador SHAP exacto por agente + politica + cooldowns
+│   ├── controller.py       SHAPFitnessController (deteccion, explain_fitness, decide)
+│   ├── profiles.py         configuracion UNICA (fracciones de MaxFES; sin perfiles)
+│   ├── features.py         FEATURE_COLUMNS (6 senales) + baselines neutros
+│   ├── actions.py          reinit_random (Rama A) / reinit_guided (Rama B)
 │
 ├── problems/               ← adaptadores; cumplen WOProblem
 │   ├── base.py             contrato Protocol
@@ -25,32 +29,22 @@ W.O Python/
 │   ├── tmlap.py            TMLAPProblem + load_problem + backtracking
 │   ├── factory.py          parse_problem_spec("cec2022:F6") / ("tmlap:path")
 │
-├── runners/                ← 3 runners parametrizados por problema
-│   ├── run_wo_base.py      WO sin controlador
-│   ├── run_wo_shap.py      WO + controlador SHAP
-│   └── compare_base_vs_shap.py   pareado, mismas semillas, Wilcoxon
+├── runners/
+│   └── run_ablation.py     runner UNICO: WO base + WO+SHAP en regimen MaxFES, pareado
 │
 ├── analysis/               ← post-corrida
-│   ├── normality.py        Shapiro-Wilk + Anderson-Darling
-│   ├── effectiveness.py    tasa improved/neutral/worsened
-│   ├── intervention_effectiveness.py
-│   ├── reporting.py        reportes HTML estandarizados
-│   ├── dashboard.py        dashboard visual
+│   ├── presentation_summary.py  resumen condensado para slides (piramide de agregacion)
+│   ├── report_html.py      reporte HTML estandarizado
+│   ├── normality.py        Shapiro-Wilk + Anderson-Darling (+ D'Agostino)
+│   ├── make_diagrams.py    diagramas de arquitectura/implementacion
+│   ├── md_to_pdf.py        conversor Markdown -> PDF
+│   ├── decoder_collapse.py
 │
 ├── 1.instancia_simple.txt  (6c x 3h)
 ├── 2.instancia_mediana.txt (12c x 5h)
 ├── 3.instancia_dura.txt    (24c x 8h)
 │
-└── experiments/            ← salidas de experimentos + tmlap_grande/
-    ├── README.md
-    ├── cec_baseline_30runs/        (resultados WO base CEC2022, 30 corridas)
-    ├── tmlap_smaller_instances/    (simple/mediana/dura, base vs shap, 30 corridas)
-    └── tmlap_grande/
-        ├── README.md                instrucciones para correr en servidor
-        ├── generate_instance.py     1000c x 500h, parametros analogos a las chicas
-        ├── 4.instancia_grande.txt
-        ├── run.sh, run.bat          one-shot runner
-        └── outputs/
+└── experiments/            ← salidas: <config>/{base,shap}/values + /curves
 ```
 
 ## Dependencias
@@ -59,106 +53,95 @@ W.O Python/
 pip install -r requirements.txt
 ```
 
-`numpy`, `pandas`, `scipy`, `opfunu==1.0.4`.
+`numpy`, `pandas`, `scipy`, `opfunu`.
 
-## Como correr cualquier experimento
-
-**Estructura del CLI** (sirve para CEC y TMLAP indistintamente):
+## Como correr (runner unico)
 
 ```bash
-python -m runners.run_wo_base \
+python -m runners.run_ablation \
     --problem <familia>:<target> \
-    --runs <N> --agents 30 --iterations <T> --seed 1234 \
-    --output <carpeta_salida>
-
-python -m runners.run_wo_shap \
-    --problem <familia>:<target> \
-    --runs <N> --agents 30 --iterations <T> --seed 1234 \
-    --profile soft --shapley-steps 3 \
-    --output <carpeta_salida>
-
-python -m runners.compare_base_vs_shap \
-    --problem <familia>:<target> \
-    --runs <N> --agents 30 --iterations <T> --seed 1234 \
-    --profile soft --shapley-steps 3 \
+    --modes base,shap \
+    --max-fes <presupuesto(s)> \
+    --runs <N> --agents 30 --dim 10 --seed 1234 \
     --output <carpeta_salida>
 ```
 
 Donde `<familia>:<target>` puede ser:
 
-- `cec2022:F6` para correr solo F6 (igualmente F1..F12).
-- `cec2022:all` para correr las 12 funciones en una sola invocacion.
-- `tmlap:1.instancia_simple.txt` (o cualquier otra instancia).
+- `cec2022:F6` para correr solo F6 (igual F1..F12).
+- `cec2022:all` para las 12 funciones en una sola invocacion.
+- `tmlap:3.instancia_dura.txt` (o cualquier otra instancia).
+
+`--max-fes` acepta varios presupuestos separados por coma (se corren todos):
+`--max-fes 5000,50000,500000,5000000`.
 
 ## Ejemplos concretos
 
-### CEC 2022 - WO base sobre F1..F12 (30 corridas)
+### CEC 2022 — ablacion base vs shap sobre F1..F12 (30 corridas, 4 MaxFES)
 
 ```bash
-python -m runners.run_wo_base \
+python -m runners.run_ablation \
     --problem cec2022:all \
-    --runs 30 --agents 30 --iterations 500 --seed 1234 \
-    --output experiments/cec_baseline_30runs
+    --modes base,shap \
+    --max-fes 5000,50000,500000,5000000 \
+    --runs 30 --agents 30 --dim 10 --seed 1234 \
+    --output experiments/cec2022_d10
 ```
 
-### CEC 2022 - WO + controlador SHAP sobre F6
+### TMLAP — instancia dura (sin optimo exacto)
 
 ```bash
-python -m runners.run_wo_shap \
-    --problem cec2022:F6 \
-    --runs 30 --agents 30 --iterations 500 --seed 1234 \
-    --profile soft --shapley-steps 3 \
-    --output experiments/cec_F6_shap_soft
+python -m runners.run_ablation \
+    --problem tmlap:3.instancia_dura.txt \
+    --modes base,shap \
+    --max-fes 50000 \
+    --runs 51 --agents 30 --seed 1234 \
+    --no-exact-optimum --init-mode random \
+    --output experiments/dura_51_fes50k
 ```
-
-### TMLAP - comparacion pareada base vs shap sobre instancia mediana
-
-```bash
-python -m runners.compare_base_vs_shap \
-    --problem tmlap:2.instancia_mediana.txt \
-    --runs 30 --agents 30 --iterations 300 --seed 1234 \
-    --profile soft --shapley-steps 3 \
-    --output experiments/tmlap_mediana_compare_30runs
-```
-
-### TMLAP - instancia grande (server-ready)
-
-```bash
-cd experiments/tmlap_grande
-RUNS=30 bash run.sh
-```
-
-Ver `experiments/tmlap_grande/README.md` para detalles.
 
 ## Flags utiles
 
 | Flag | Default | Aplica a | Para que |
 |------|---------|----------|----------|
-| `--profile` | `soft` | run_wo_shap, compare | Perfil del controlador (soft/medium/hard) |
-| `--init-mode` | `local_search` | TMLAP | Usar `random` para instancias grandes (>= 100 clientes) |
-| `--shapley-steps` | 3 | run_wo_shap, compare | Pasos del WO simulados por coalicion Shapley |
-| `--acceptance-mode` | `diversity` | run_wo_shap, compare | Compuerta de aceptacion del rescate |
-| `--dim` | 10 | CEC | Dimensionalidad del benchmark |
+| `--modes` | `base,shap` | todo | Modos a correr (pareados por semilla) |
+| `--max-fes` | `50000` | todo | Presupuesto(s) MaxFES, separados por coma |
+| `--runs` | `51` | todo | Corridas independientes por configuracion |
+| `--dim` | `10` | CEC | Dimensionalidad del benchmark |
+| `--agents` | `30` | todo | Tamano de poblacion |
+| `--init-mode` | `local_search` | TMLAP | `random` salta local_search (instancias grandes) |
+| `--no-exact-optimum` | (off) | TMLAP | No calcular optimo exacto (instancias intratables): gap=NaN |
+| `--clients` / `--hubs` | — | TMLAP | Override de tamano de instancia |
+
+> El controlador NO se parametriza por flags: su configuracion es **unica** y vive
+> en `shap_controller/profiles.py` como fracciones de MaxFES (ventana de
+> estancamiento 10%; guard/cooldowns/shap_budget 5%; late 95%; umbral de
+> dominancia 0.90; amplificacion 2.0; 3 pasos Shapley).
 
 ## Salidas estandar
 
-Cualquier runner produce dentro de `<output>/values/`:
+El runner produce, por modo, dentro de `<output>/<modo>/`:
 
-- `summary.csv` o `summary_{base,shap}.csv`: 1 fila por corrida.
-- `statistics.csv`: best/worst/mean/median/std por problema.
-- `paired.csv`: 1 fila por par base/shap con `delta_base_minus_shap` (solo compare).
-- `tests.csv`: Wilcoxon signed-rank emparejado + sign test (solo compare).
-- `controller_events.csv`: eventos del controlador SHAP (solo shap/compare).
-- `shap_values.csv`: atribuciones SHAP por evento (solo shap/compare).
-- `curves/conv_curve_*.csv`: curvas de convergencia por (problema, run, algoritmo).
+- `values/summary.csv`: 1 fila por corrida (`final_fitness`, `gap_to_optimum`,
+  `interventions`, `shap_explanations`, `t_init_seconds`, `t_shap_seconds`,
+  telemetria de estancamiento, `n_reinit_random`, `n_reinit_guided`, buckets de FES).
+- `curves/conv_curve_F<n>_fes<M>_run<r>.csv`: curva de convergencia (`fes, best`).
+- (solo `shap`) `values/controller_events.csv`: una fila por intervencion.
+- (solo `shap`) `values/controller_non_events.csv`: candidatos bloqueados (motivo).
+- (solo `shap`) `values/shap_values.csv`: las 6 atribuciones SHAP + dominante por explicacion.
+
+Resumen para presentacion / analisis:
+
+```bash
+python -m analysis.presentation_summary --input experiments --out-dir experiments/presentacion
+```
 
 ## Reproducibilidad
 
-Las semillas se computan como `seed_base + problem_idx*1000 + (run_id - 1)`,
-lo que garantiza:
+Las semillas se computan como
+`seed + max_fes_idx*100000 + problem_idx*1000 + run_idx`
+(**independiente del modo**), lo que garantiza:
 
-1. WO_base y WO_shap usan **la misma semilla** por cada `run_id` -> Wilcoxon
-   emparejado valido.
+1. `base` y `shap` usan **la misma semilla** por cada `run_id` → Wilcoxon pareado valido.
 2. Corridas distintas de la misma funcion usan semillas distintas.
-3. Corridas con la misma `seed_base` reproducen exactamente los resultados
-   (mientras la version de Python y numpy no cambien).
+3. Misma `--seed` reproduce exactamente los resultados (misma version de Python/numpy).
