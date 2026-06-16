@@ -431,7 +431,11 @@ def run_one_shap(problem, args, max_fes, max_fes_idx, run_id, problem_idx, probl
 
             positions[i, :] = candidate
             fitness_values[i] = cand_fitness
-            last_improve_fes[i] = budget.total
+            # FIX: el reloj de estancamiento se anclaba a "ultima INTERVENCION"
+            # (resetear siempre). Ahora se ancla a "ultima MEJORA real" (consistente
+            # con Informe_Metodologia.md §4): solo resetear si la intervencion mejoro.
+            if improved:
+                last_improve_fes[i] = budget.total
             if cand_fitness < pbest[i]:
                 pbest[i] = cand_fitness
             if cand_fitness < best_score:

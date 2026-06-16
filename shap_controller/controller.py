@@ -38,8 +38,13 @@ from .profiles import (
 )
 
 
-def improvement_threshold(fitness, abs_eps=1e-10, rel_eps=1e-6):
-    """Tolerancia adaptativa de mejora: max(absoluta, relativa·|fitness|)."""
+def improvement_threshold(fitness, abs_eps=1e-10, rel_eps=1e-4):
+    """Tolerancia adaptativa de mejora: max(absoluta, relativa·|fitness|).
+
+    rel_eps=1e-4 (0.01% relativo): ruido numerico microscopico ya NO se cuenta
+    como mejora. Antes (1e-6) cualquier oscilacion del orden de 1e-6*|f| pateaba
+    `last_improve_fes` y mantenia al agente fuera de la ventana de estancamiento.
+    """
     return max(abs_eps, rel_eps * max(abs(float(fitness)), 1.0))
 
 

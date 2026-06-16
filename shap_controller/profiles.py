@@ -36,9 +36,12 @@ CONFIDENCE_FRACTION = 0.95     # nivel de confianza (1-alpha) -> limite tardio
 #   - share de la feature dominante >= CONTRIBUTION_THRESHOLD -> Rama B (reinit guiado:
 #     un paso WO con la senal dominante amplificada).
 #   - en otro caso                                            -> Rama A (reinit aleatorio).
-# 0.90 (90% de importancia / confianza) es lo que indico el guia; es ESTRICTO y puede
-# requerir calibracion (el guia dijo que el valor fino necesita analisis mas detallado).
-CONTRIBUTION_THRESHOLD = 0.90
+# 0.90 era el inicial del guia (90% de importancia). Analisis de 8205 intervenciones
+# (CEC 4 budgets + TMLAP dura): con 0.90 solo el 44% va a Rama B (guiado, 57% efectivo)
+# y el 56% cae en Rama A (random, 29% efectivo). Bajar a 0.50 hace que ~75% de las
+# intervenciones usen la senal SHAP dominante (cualquier mayoria simple), aprovechando
+# que guided es ~2x mas efectivo que random.
+CONTRIBUTION_THRESHOLD = 0.50
 # Factor de amplificacion de la senal dominante en la Rama B (tunable).
 AMPLIFICATION_FACTOR = 2.0
 
