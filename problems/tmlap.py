@@ -251,6 +251,13 @@ def _extract_literal(text, key):
 def load_problem(path, clients=None, hubs=None):
     """Carga una instancia TMLAP desde un archivo .txt con asignaciones ``self.X``."""
     path = Path(path)
+    if not path.exists():
+        # Fallback compatibilidad: las instancias se movieron a data/ (Fase B reorg).
+        # Permite que specs cortas (tmlap:3.instancia_dura.txt) sigan funcionando.
+        repo_root = Path(__file__).resolve().parents[1]
+        fallback = repo_root / "data" / path.name
+        if fallback.exists():
+            path = fallback
     text = path.read_text(encoding="utf-8")
     n_clients = _extract_scalar(text, "n_clientes") or _extract_scalar(text, "n_clients")
     n_hubs = _extract_scalar(text, "n_hubs")

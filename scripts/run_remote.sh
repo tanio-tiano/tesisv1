@@ -47,16 +47,16 @@ fi
 OUT="${OUT:-experiments/ablation_b4_dura_${RUNS}}"
 LOG="ablation_$(basename "$OUT").log"
 
-# Verifica que las instancias se resuelven desde aqui (raiz del repo).
-if [ ! -f "3.instancia_dura.txt" ]; then
-  echo "ERROR: ejecuta este script desde la raiz del repo (no encuentro 3.instancia_dura.txt)." >&2
+# Verifica que la instancia exista (se movio a data/ en la Fase B reorg).
+if [ ! -f "data/3.instancia_dura.txt" ]; then
+  echo "ERROR: ejecuta este script desde la raiz del repo (no encuentro data/3.instancia_dura.txt)." >&2
   exit 1
 fi
 
 echo "Config:  runs=$RUNS  MaxFES=$MAXFES  output=$OUT"
 
 nohup python -m runners.run_ablation \
-  --problem "tmlap:3.instancia_dura.txt" --agents 30 --max-fes "$MAXFES" \
+  --problem "tmlap:data/3.instancia_dura.txt" --agents 30 --max-fes "$MAXFES" \
   --runs "$RUNS" --modes base,shap \
   --init-mode random --no-exact-optimum --output "$OUT" \
   > "$LOG" 2>&1 &
