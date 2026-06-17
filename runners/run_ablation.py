@@ -425,6 +425,7 @@ def run_one_shap(problem, args, max_fes, max_fes_idx, run_id, problem_idx, probl
                 signals=signal_state, dominant_feature=decision["dominant_feature"],
                 role_counts=role_counts, best_pos=best_pos, second_pos=second_pos,
                 amplification_factor=controller.amplification_factor, rng=rng,
+                dominant_value=decision.get("dominant_value", 0.0),
             )
             cand_fitness = float(eval_intervention(candidate))
             improved = cand_fitness < old_fitness - improvement_threshold(old_fitness)

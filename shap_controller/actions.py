@@ -71,19 +71,31 @@ def reinit_guided_agent(
     second_pos,
     amplification_factor,
     rng=None,
+    dominant_value=0.0,
 ):
-    """Rama B: un paso WO desde la posicion actual con la senal dominante amplificada.
+    """Rama B: un paso WO desde la posicion actual con la senal dominante amplificada,
+    usando el SIGNO del SHAP para elegir la direccion (Lundberg & Lee 2017).
 
-    ``signals`` es el dict de las 6 senales actuales (alpha, beta, A, R,
-    danger_signal, safety_signal). Se amplifica SOLO ``dominant_feature``
-    alejandola de su baseline neutro: ``sig' = base + factor*(sig - base)``
-    (acotada a su rango valido). Luego se ejecuta un unico paso de
-    ``apply_wo_movement_single`` con esas senales. Devuelve la nueva posicion.
+    En minimizacion, el signo de Shapley es informativo:
+    - ``dominant_value < 0`` (senal BENEFICIOSA: baja el fitness) -> amplificar
+      en su direccion actual (profundizar el efecto positivo).
+    - ``dominant_value > 0`` (senal PERJUDICIAL: sube el fitness) -> invertir
+      la direccion (llevar la senal a la zona opuesta del baseline, que el
+      SHAP predice como mas favorable).
+    - ``dominant_value == 0`` (default backward-compatible) -> direccion +1
+      (comportamiento anterior).
+
+    Formula: ``sig' = base + direction * factor * (sig - base)``, donde
+    ``direction = -1 if dominant_value > 0 else +1``. Se mantiene el clip al
+    rango valido de la senal.
     """
     amplified = {key: float(value) for key, value in signals.items()}
     if dominant_feature in amplified and dominant_feature in FEATURE_BASELINE_DEFAULTS:
         base = FEATURE_BASELINE_DEFAULTS[dominant_feature]
-        value = base + float(amplification_factor) * (amplified[dominant_feature] - base)
+        direction = -1.0 if float(dominant_value) > 0.0 else +1.0
+        value = base + direction * float(amplification_factor) * (
+            amplified[dominant_feature] - base
+        )
         lo, hi = _SIGNAL_RANGES.get(dominant_feature, (-np.inf, np.inf))
         amplified[dominant_feature] = float(np.clip(value, lo, hi))
 
@@ -113,16 +125,20 @@ def dispatch_rescue_single(
     second_pos=None,
     amplification_factor=2.0,
     rng=None,
+    dominant_value=0.0,
 ):
     """Enruta a la rama A (``reinit_random``) o B (``reinit_guided``).
 
     Devuelve el nuevo vector de posicion del agente ``index``. La Rama B requiere
     ``signals``, ``dominant_feature``, ``role_counts``, ``best_pos``, ``second_pos``.
+    ``dominant_value`` (signed SHAP de la dominante) define la direccion de la
+    amplificacion en la Rama B; opcional para backward compat.
     """
     if action == REINIT_GUIDED:
         return reinit_guided_agent(
             positions, index, lb, ub, signals, dominant_feature,
             role_counts, best_pos, second_pos, amplification_factor, rng=rng,
+            dominant_value=dominant_value,
         )
     if action == REINIT_RANDOM:
         return reinit_random_agent(positions, index, lb, ub, rng=rng)

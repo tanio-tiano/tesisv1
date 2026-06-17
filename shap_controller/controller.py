@@ -240,9 +240,14 @@ class SHAPFitnessController:
         if total > 0:
             dominant_feature = max(abs_values, key=abs_values.get)
             dominant_share = abs_values[dominant_feature] / total
+            # Valor SIGNED del SHAP de la dominante: en minimizacion, SHAP<0
+            # es benefico (la senal baja el fitness) y SHAP>0 es perjudicial.
+            # Lo usa reinit_guided_agent para decidir direccion de amplificacion.
+            dominant_value = float(shap_values.get(dominant_feature, 0.0))
         else:
             dominant_feature = ""
             dominant_share = 0.0
+            dominant_value = 0.0
 
         if dominant_share >= self.contribution_threshold:
             action = REINIT_GUIDED
@@ -260,6 +265,7 @@ class SHAPFitnessController:
             "policy_signal": policy_signal,
             "dominant_feature": dominant_feature,
             "dominant_share": float(dominant_share),
+            "dominant_value": float(dominant_value),
         }
 
     # ------------------------------------------------------------------

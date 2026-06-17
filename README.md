@@ -129,8 +129,8 @@ python -m runners.run_ablation \
 
 > El controlador NO se parametriza por flags: su configuracion es **unica** y vive
 > en `shap_controller/profiles.py` como fracciones de MaxFES (ventana de
-> estancamiento 10%; guard/cooldowns/shap_budget 5%; late 95%; **umbral de
-> dominancia 0.50** — mayoria simple; amplificacion 2.0; 3 pasos Shapley).
+> estancamiento 10%; guard/cooldowns/shap_budget 5%; late 95%; umbral de
+> dominancia 0.90; amplificacion 2.0 con direccion segun signo SHAP; 3 pasos Shapley).
 
 ## Salidas estandar
 

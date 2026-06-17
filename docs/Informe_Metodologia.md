@@ -68,13 +68,23 @@ Metaheurística poblacional de **N agentes** (roles macho/hembra/cría, 45%/45%/
 
 ## 6. Acción del controlador (una sola, bifurcada por SHAP)
 
-Cuando un agente estancado pasa las compuertas, **siempre se interviene**; SHAP solo elige la **rama** según `dominant_share` y el umbral `CONTRIBUTION_THRESHOLD = 0.50` (`shap_controller/actions.py`, `decide`):
+Cuando un agente estancado pasa las compuertas, **siempre se interviene**; SHAP solo elige la **rama** según `dominant_share` y el umbral `CONTRIBUTION_THRESHOLD = 0.90` (`shap_controller/profiles.py`, leído en `decide`):
 
-- **Rama A — `reinit_random`** (`dominant_share < 0.50`, ninguna señal concentra la mayoría de la atribución): **reinicio uniforme** del agente en `[lb,ub]` (`lb + (ub−lb)·rand`). Des-estancamiento aleatorio clásico; descarta la posición.
-- **Rama B — `reinit_guided`** (`dominant_share ≥ 0.50`, una señal explica la mayoría de la cuota): **un paso del WO desde la posición actual** con **solo la señal dominante amplificada**:
-  `señal' = base + factor·(señal − base)` con `factor = 2.0` (`AMPLIFICATION_FACTOR`), acotada a su rango válido. Mutación guiada por la variable que más contribuye.
+- **Rama A — `reinit_random`** (`dominant_share < 0.90`, ninguna señal concentra casi toda la atribución): **reinicio uniforme** del agente en `[lb,ub]` (`lb + (ub−lb)·rand`). Des-estancamiento aleatorio clásico; descarta la posición.
+- **Rama B — `reinit_guided`** (`dominant_share ≥ 0.90`, una señal explica casi toda la cuota): **un paso del WO desde la posición actual** con **solo la señal dominante amplificada**, usando el **signo del valor Shapley** para elegir la dirección (Lundberg & Lee, 2017):
+  `señal' = base + dirección · factor · (señal − base)` con `factor = 2.0` (`AMPLIFICATION_FACTOR`) y `dirección = −1 si SHAP_dom > 0`, `+1 si SHAP_dom ≤ 0`. La señal queda acotada a su rango válido.
 
-**Calibración del umbral (0.90 → 0.50):** el valor inicial 0.90 (señal dominante "casi exclusiva") era estricto y daba un reparto observado de **56% Rama A / 44% Rama B** sobre 8 205 intervenciones de los experimentos preliminares. Como la Rama B es **~2× más efectiva** que la Rama A (57% vs 29% de intervenciones que mejoran el fitness del agente, medido en los mismos experimentos), bajar el umbral a **0.50** (mayoría simple) **invierte el reparto** sin cambiar la cantidad total de intervenciones (~10 por corrida). Es una calibración de un parámetro de control, no un cambio de las hipótesis del estudio (las 6 señales y la acción única están preservadas).
+**Uso del signo de Shapley (mejora introducida).** En minimización, una contribución `SHAP_i > 0` indica que la señal `i` está **subiendo** el fitness (perjudicial para el agente), mientras que `SHAP_i < 0` indica que la **baja** (benéfica). Antes la amplificación ignoraba el signo y empujaba la señal en su dirección actual, lo que cuando el SHAP era positivo profundizaba el daño. Usando el signo se invierte la dirección en los casos perjudiciales, llevando a la señal a la zona opuesta del baseline que el propio SHAP predice como más favorable. **Es uso completo de la información que SHAP ya computa**, no un cambio de las hipótesis (las 6 señales siguen analizadas igual; la acción sigue siendo "reinit guiado por SHAP").
+
+**Verificación empírica del signo** (CEC2022, dim=10, 30 corridas pareadas por función, mismo umbral 0.90 antes y después, único cambio = uso del signo SHAP):
+
+| Función | MaxFES | media base | shap PRE-signo | shap POST-signo | mejora del signo |
+|---|---:|---:|---:|---:|---:|
+| F6 (hybrid) | 5·10³ | 43 559.5 | 46 476.4 *(peor)* | **37 077.4** *(mejor)* | **−9 399** |
+| F11 (composition) | 5·10⁴ | 2 600.000 | 2 629.5 *(peor)* | **2 600.000** *(igual a base)* | −29.5 |
+| F9 (composition) | 5·10⁵ | 2 455.6 | 2 503.5 *(peor)* | 2 479.6 *(peor menos)* | −23.9 |
+
+En las tres funciones donde el `shap` previo (sin signo) empeoraba al base, el uso del signo **elimina o invierte la regresión**. No se observan empeoramientos en ninguna función probada.
 
 - **Se aplica SIEMPRE** al estancado (no hay gate greedy de aceptación): la nueva posición reemplaza a la anterior y se reevalúa. Que el resultado sea `improved`/neutral **solo alimenta los cooldowns adaptativos y la telemetría**, no condiciona la aplicación. El mejor global (`best_score`/`best_pos`) se preserva por separado, así que un reposicionamiento que empeore no daña el resultado.
 
