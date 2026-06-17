@@ -38,11 +38,24 @@ W.O Python/
 │   ├── normality.py        Shapiro-Wilk + Anderson-Darling (+ D'Agostino)
 │   ├── make_diagrams.py    diagramas de arquitectura/implementacion
 │   ├── md_to_pdf.py        conversor Markdown -> PDF
-│   ├── decoder_collapse.py
 │
-├── 1.instancia_simple.txt  (6c x 3h)
-├── 2.instancia_mediana.txt (12c x 5h)
-├── 3.instancia_dura.txt    (24c x 8h)
+├── data/                   ← instancias TMLAP
+│   ├── 1.instancia_simple.txt   (6c x 3h)
+│   ├── 2.instancia_mediana.txt  (12c x 5h)
+│   ├── 3.instancia_dura.txt     (24c x 8h)
+│   └── 4.instancia_grande.txt   (1000c x 500h)
+│
+├── scripts/                ← lanzadores remotos (nohup + barrido de MaxFES)
+│   ├── run_remote.sh       TMLAP dura
+│   └── run_remote_cec.sh   CEC2022 con sweep de presupuestos
+│
+├── docs/                   ← documentacion viva
+│   ├── Informe_Metodologia.md    metodologia tecnica
+│   ├── INFORME_2.md
+│   ├── MANUAL_USUARIO.md
+│   └── Presentacion_2.md
+│
+├── _archive/               ← codigo huerfano preservado por trazabilidad
 │
 └── experiments/            ← salidas: <config>/{base,shap}/values + /curves
 ```
@@ -70,7 +83,8 @@ Donde `<familia>:<target>` puede ser:
 
 - `cec2022:F6` para correr solo F6 (igual F1..F12).
 - `cec2022:all` para las 12 funciones en una sola invocacion.
-- `tmlap:3.instancia_dura.txt` (o cualquier otra instancia).
+- `tmlap:3.instancia_dura.txt` (busqueda con fallback automatico a `data/`),
+  o explicito `tmlap:data/3.instancia_dura.txt`.
 
 `--max-fes` acepta varios presupuestos separados por coma (se corren todos):
 `--max-fes 5000,50000,500000,5000000`.
@@ -115,8 +129,8 @@ python -m runners.run_ablation \
 
 > El controlador NO se parametriza por flags: su configuracion es **unica** y vive
 > en `shap_controller/profiles.py` como fracciones de MaxFES (ventana de
-> estancamiento 10%; guard/cooldowns/shap_budget 5%; late 95%; umbral de
-> dominancia 0.90; amplificacion 2.0; 3 pasos Shapley).
+> estancamiento 10%; guard/cooldowns/shap_budget 5%; late 95%; **umbral de
+> dominancia 0.50** — mayoria simple; amplificacion 2.0; 3 pasos Shapley).
 
 ## Salidas estandar
 

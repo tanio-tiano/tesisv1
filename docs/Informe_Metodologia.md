@@ -31,6 +31,8 @@ Metaheurística poblacional de **N agentes** (roles macho/hembra/cría, 45%/45%/
 
 **Mecanismo.** Cada agente guarda `last_improve_fes` (FES de la última mejora de su mejor personal). El reloj es una resta: `fes_since_improve = FES_actual − last_improve_fes`. Un agente está **estancado** cuando `fes_since_improve ≥ 10% de MaxFES` (ventana deslizante anclada a la última mejora). Esto **no usa SHAP** (es barato: un contador). En cada iteración se procesan **primero los más estancados** (orden descendente de `fes_since_improve`).
 
+**Qué cuenta como "mejora real" (anclaje del reloj):** una variación de fitness se considera mejora cuando `Δf > improvement_threshold(f) = max(10⁻¹⁰, 10⁻⁴·|f|)`. Es decir, **0,01% relativo o `1e-10` absoluto, lo que sea mayor**. Ruido numérico microscópico (`< 0,01%`) no resetea el reloj. Además, **tras una intervención del controlador, el reloj solo se reinicia si la intervención efectivamente mejoró el fitness** (consistente con "anclaje a la última mejora personal"); si la intervención fue neutra o empeoró, el agente conserva su `fes_since_improve` previo y los cooldowns adaptativos regulan cuándo puede volver a ser candidato.
+
 **Compuertas (todas en FES, como fracciones de MaxFES — `profiles.py`):**
 
 | Compuerta | Valor | Para qué |
@@ -66,11 +68,13 @@ Metaheurística poblacional de **N agentes** (roles macho/hembra/cría, 45%/45%/
 
 ## 6. Acción del controlador (una sola, bifurcada por SHAP)
 
-Cuando un agente estancado pasa las compuertas, **siempre se interviene**; SHAP solo elige la **rama** según `dominant_share` y el umbral `CONTRIBUTION_THRESHOLD = 0.90` (`shap_controller/actions.py`, `decide`):
+Cuando un agente estancado pasa las compuertas, **siempre se interviene**; SHAP solo elige la **rama** según `dominant_share` y el umbral `CONTRIBUTION_THRESHOLD = 0.50` (`shap_controller/actions.py`, `decide`):
 
-- **Rama A — `reinit_random`** (`dominant_share < 0.90`, ninguna señal concentra la atribución): **reinicio uniforme** del agente en `[lb,ub]` (`lb + (ub−lb)·rand`). Des-estancamiento aleatorio clásico; descarta la posición.
-- **Rama B — `reinit_guided`** (`dominant_share ≥ 0.90`, una señal domina): **un paso del WO desde la posición actual** con **solo la señal dominante amplificada**:
+- **Rama A — `reinit_random`** (`dominant_share < 0.50`, ninguna señal concentra la mayoría de la atribución): **reinicio uniforme** del agente en `[lb,ub]` (`lb + (ub−lb)·rand`). Des-estancamiento aleatorio clásico; descarta la posición.
+- **Rama B — `reinit_guided`** (`dominant_share ≥ 0.50`, una señal explica la mayoría de la cuota): **un paso del WO desde la posición actual** con **solo la señal dominante amplificada**:
   `señal' = base + factor·(señal − base)` con `factor = 2.0` (`AMPLIFICATION_FACTOR`), acotada a su rango válido. Mutación guiada por la variable que más contribuye.
+
+**Calibración del umbral (0.90 → 0.50):** el valor inicial 0.90 (señal dominante "casi exclusiva") era estricto y daba un reparto observado de **56% Rama A / 44% Rama B** sobre 8 205 intervenciones de los experimentos preliminares. Como la Rama B es **~2× más efectiva** que la Rama A (57% vs 29% de intervenciones que mejoran el fitness del agente, medido en los mismos experimentos), bajar el umbral a **0.50** (mayoría simple) **invierte el reparto** sin cambiar la cantidad total de intervenciones (~10 por corrida). Es una calibración de un parámetro de control, no un cambio de las hipótesis del estudio (las 6 señales y la acción única están preservadas).
 
 - **Se aplica SIEMPRE** al estancado (no hay gate greedy de aceptación): la nueva posición reemplaza a la anterior y se reevalúa. Que el resultado sea `improved`/neutral **solo alimenta los cooldowns adaptativos y la telemetría**, no condiciona la aplicación. El mejor global (`best_score`/`best_pos`) se preserva por separado, así que un reposicionamiento que empeore no daña el resultado.
 
@@ -105,7 +109,7 @@ Salida estructurada por modo: `experiments/<config>/{base,shap}/values/` + `/cur
 
 **Conclusión de calidad (Esp. 4):** en calidad de solución, **shap ≈ base**; la mayoría de funciones empata y no hay mejora significativa. Es un resultado **válido y honesto**.
 
-**Actividad del controlador (CEC):** ~**10 intervenciones/corrida** (media 9.97); reparto **342 `reinit_random` / 256 `reinit_guided`** (≈43% guiadas, dado el umbral estricto 0.90). Señal **dominante**: `safety_signal` (243 veces), seguida de `alpha` (149) y `danger_signal` (111).
+**Actividad del controlador (CEC, snapshot pre-calibración con `CONTRIBUTION_THRESHOLD = 0.90`):** ~**10 intervenciones/corrida** (media 9.97); reparto **342 `reinit_random` / 256 `reinit_guided`** (≈43% guiadas, dado el umbral estricto 0.90). Señal **dominante**: `safety_signal` (243 veces), seguida de `alpha` (149) y `danger_signal` (111). Tras la calibración a `0.50` (§6) se espera el reparto invertido (~72% guiadas / ~28% aleatorias) sin alterar la cantidad total de intervenciones; la verificación con corridas completas queda pendiente.
 
 **Costo computacional (despreciable):** `192` FES por explicación (64 coaliciones × 3 pasos) × ~10 explicaciones ≈ **~1.900 FES** sobre 500.000 → **≈ 0,4%** del presupuesto. El WO hace el trabajo real de optimización.
 
