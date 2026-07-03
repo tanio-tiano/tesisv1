@@ -23,9 +23,28 @@ Metaheurística poblacional de **N agentes** (roles macho/hembra/cría, 45%/45%/
 - **Criterio de parada: MaxFES.** Protocolo: MaxFES ∈ {5·10³, 5·10⁴, 5·10⁵, 5·10⁶}; **comparación pareada** con Wilcoxon (Friedman cuando haya ≥3 algoritmos).
 - **Ablación pareada `base` vs `shap`.** Un único runner (`runners/run_ablation.py --modes base,shap`) corre ambos modos con **la misma semilla por corrida** (`_seed_for` no depende del modo) → habilita el test pareado. `base` = WO sin controlador; `shap` = WO + controlador SHAP.
 - **Configuración ÚNICA del controlador** (`shap_controller/profiles.py`): todos los parámetros temporales son **fracciones de MaxFES** y se resuelven a valores absolutos en FES; **no hay perfiles ni re-tuning** por MaxFES ni por problema.
-- **Inicialización desde cero:** el WO realiza toda la optimización. CEC2022 → muestreo **uniforme** en `[lb,ub]`; TMLAP → **asignación factible aleatoria** (la factibilidad es obligatoria por las restricciones).
+- **Inicialización desde cero:** el WO realiza toda la optimización. CEC2022 → muestreo **uniforme** en `[lb,ub]`; TMLAP → **asignación factible aleatoria** (la factibilidad es obligatoria por las restricciones); MLPAP → **muestreo uniforme en el encoding continuo** `[0, m−1]^n` (la infactibilidad se penaliza vía `f̃ = f + π·v`, ver §3.3).
 - **Contabilidad de FES:** toda evaluación de la función objetivo se descuenta del MaxFES global, en buckets separados (`search`, `shap`, `intervention`, `init`). El costo de SHAP **gasta FES contabilizado** → comparación justa.
-- **Datasets:** CEC2022 (F1–F12, dim 10, dominio `[-100,100]`) y TMLAP (caso aplicado, instancia dura 24 clientes × 8 hubs).
+- **Datasets:**
+  - **CEC2022** (F1–F12, dim 10, dominio `[-100,100]`).
+  - **TMLAP** (caso aplicado, instancia dura 24 clientes × 8 hubs).
+  - **MLPAP** (caso aplicado extendido; ver §3.3).
+
+### 3.3. Caso aplicado extendido: MLPAP
+
+El **Microhub Location and Pedestrian Assignment Problem (MLPAP)** es una generalización del CFLP que incorpora costos operativos, utilización mínima por hub, cobertura peatonal, cardinalidad de hubs abiertos y penalización aditiva sin repair. La función objetivo (Ec. 1 del PDF de referencia) minimiza costos de facility (fijos + operativos por unidad de demanda) más costo ponderado de asignación por prioridad y distancia:
+
+`f(z) = Σ_j [f_j·y_j + o_j·Σ_c q_c·x_cj]  +  Σ_c Σ_j w_c·d_cj·x_cj`.
+
+Las restricciones son: asignación única, utilización mínima `μ_j` y máxima `L_j` por hub, coherencia hub-cliente, distancia peatonal máxima `D_max` y cardinalidad `P_min ≤ Σ_j y_j ≤ P_max`. El manejo de infactibilidad es **estrictamente por penalización aditiva** (Ec. 8: `f̃(z) = f(z) + π·v(z)`, con `π = 10 000`), sin repair heurístico — decisión metodológica del paper para preservar la dinámica original de cada metaheurística.
+
+**Dataset:** 100 instancias en 5 escalas — `S (20×8)`, `M (50×15)`, `L (100×25)`, `XL (250×50)`, `2XL (1000×100)` — 20 instancias por escala.
+
+**Encoding.** Vector continuo `x ∈ [0, m−1]^n`, dim = n (clientes). El decoder redondea y clipea; satisface por construcción la asignación única y la coherencia hub-cliente. Las restantes restricciones se penalizan.
+
+**Presupuesto.** Se fija `MaxFES = 5·10⁵` para las 5 escalas, coincidiendo con el presupuesto empleado en el Seminario 2 sobre CEC2022 y TMLAP. Esta elección conserva la comparabilidad de resultados entre el trabajo previo y la extensión al problema aplicado, garantizando que el efecto del controlador se evalúa bajo un presupuesto homogéneo. Un barrido multi-presupuesto por escala se deja explícitamente como trabajo futuro.
+
+**Implementación.** El adaptador (`problems/mlpap.py`) usa un kernel `@njit` (Numba, compilado JIT en la primera invocación y cacheado en disco) que evalúa `f̃(z)` en `O(n + m)` a velocidad C. Si Numba no está disponible el kernel usa fallback puro NumPy (~5–10× más lento, funcionalmente idéntico).
 
 ## 4. Detección de estancamiento (por agente, en FES)
 

@@ -27,7 +27,8 @@ W.O Python/
 │   ├── base.py             contrato Protocol
 │   ├── cec2022.py          envuelve opfunu
 │   ├── tmlap.py            TMLAPProblem + load_problem + backtracking
-│   ├── factory.py          parse_problem_spec("cec2022:F6") / ("tmlap:path")
+│   ├── mlpap.py            MLPAPProblem + kernel Numba (evaluate acelerado)
+│   ├── factory.py          parse_problem_spec("cec2022:F6") / ("tmlap:path") / ("mlpap:path")
 │
 ├── runners/
 │   └── run_ablation.py     runner UNICO: WO base + WO+SHAP en regimen MaxFES, pareado
@@ -39,15 +40,16 @@ W.O Python/
 │   ├── make_diagrams.py    diagramas de arquitectura/implementacion
 │   ├── md_to_pdf.py        conversor Markdown -> PDF
 │
-├── data/                   ← instancias TMLAP
-│   ├── 1.instancia_simple.txt   (6c x 3h)
-│   ├── 2.instancia_mediana.txt  (12c x 5h)
-│   ├── 3.instancia_dura.txt     (24c x 8h)
-│   └── 4.instancia_grande.txt   (1000c x 500h)
+├── data/                   ← instancias
+│   ├── 1..4.instancia_*.txt        TMLAP (6c/12c/24c/1000c x hubs)
+│   └── mlpap/                      MLPAP: 5 instancias representativas
+│       └── S01/M01/L01/XL01/2XL01.json  (dataset completo 100 fuera del repo)
 │
 ├── scripts/                ← lanzadores remotos (nohup + barrido de MaxFES)
-│   ├── run_remote.sh       TMLAP dura
-│   └── run_remote_cec.sh   CEC2022 con sweep de presupuestos
+│   ├── run_remote.sh              TMLAP dura
+│   ├── run_remote_cec.sh          CEC2022 con sweep de presupuestos
+│   ├── run_remote_mlpap_smoke.sh  MLPAP smoke (1 instancia, foreground)
+│   └── run_remote_mlpap.sh        MLPAP barrido (100 instancias, MaxFES=5e5)
 │
 ├── docs/                   ← documentacion viva
 │   ├── Informe_Metodologia.md    metodologia tecnica
@@ -66,7 +68,8 @@ W.O Python/
 pip install -r requirements.txt
 ```
 
-`numpy`, `pandas`, `scipy`, `opfunu`.
+`numpy`, `pandas`, `scipy`, `opfunu`. Opcionales: `shap` (modo KernelSHAP),
+`numba` (acelera `problems/mlpap.py` ~5–10×; con fallback numpy si falta).
 
 ## Como correr (runner unico)
 
@@ -85,6 +88,7 @@ Donde `<familia>:<target>` puede ser:
 - `cec2022:all` para las 12 funciones en una sola invocacion.
 - `tmlap:3.instancia_dura.txt` (busqueda con fallback automatico a `data/`),
   o explicito `tmlap:data/3.instancia_dura.txt`.
+- `mlpap:S01.json` (fallback a `data/mlpap/`), o explicito con ruta absoluta.
 
 `--max-fes` acepta varios presupuestos separados por coma (se corren todos):
 `--max-fes 5000,50000,500000,5000000`.

@@ -3,3 +3,4 @@ pandas==3.0.2
 scipy==1.17.1
 opfunu==1.0.4
 shap>=0.46          # modo 'kernelshap': aproximacion de Shapley (KernelExplainer)
+numba>=0.58         # acelera problems/mlpap.py (evaluate); opcional (fallback numpy)
