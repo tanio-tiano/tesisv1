@@ -1,0 +1,2 @@
+# Los scripts shell deben usar LF para correr en Linux (servidor remoto).
+*.sh text eol=lf

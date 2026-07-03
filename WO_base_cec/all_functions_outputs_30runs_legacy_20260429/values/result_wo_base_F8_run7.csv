@@ -1,2 +1,0 @@
-run_id,benchmark,benchmark_source,algorithm,gbest_mode,function,function_id,function_name,function_family,dim,agents,iterations,seed,initial_fitness,final_fitness,optimum,gap_to_optimum,best_position,curve_csv,status
-7,cec2022,opfunu,WO_base,legacy,F8,8,Hybrid Function 3,hybrid,10,30,500,7241,67190850517.58988,3060.144896633273,2200.0,860.1448966332732,23.0238410236 51.3909974542 -63.111174644 -64.2782898909 17.6930843259 15.3351605022 -38.2400861684 4.15199576628 39.0201982438 73.6884734471,all_functions_outputs_30runs_legacy_20260429\values\conv_curve_F8_run7.csv,completed

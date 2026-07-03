@@ -1,0 +1,210 @@
+================================================================================
+COMO EJECUTAR LOS EXPERIMENTOS — Walrus Optimizer + Controlador SHAP
+================================================================================
+
+Este archivo describe los dos scripts de barrido (CEC 2022 y TMLAP dura) y el
+runner unificado que llaman. Todo se corre DESDE LA RAIZ DEL REPO (la carpeta
+que contiene `runners/`, `wo_core/`, `experiments/`, etc.).
+
+--------------------------------------------------------------------------------
+1. REQUISITOS
+--------------------------------------------------------------------------------
+
+- Python 3.11+ con las dependencias del proyecto:
+      pip install -r requirements.txt
+  (Incluye numpy, pandas, opfunu, shap.)
+- La libreria `opfunu` es la unica externa imprescindible para CEC 2022.
+- Las instancias TMLAP (`1.instancia_simple.txt`, ..., `4.instancia_grande.txt`)
+  deben estar en la raiz del repo. Solo `3.instancia_dura.txt` es usada por
+  `run_remote.sh` por defecto.
+
+--------------------------------------------------------------------------------
+2. BARRIDO CEC 2022 — `run_remote_cec.sh`
+--------------------------------------------------------------------------------
+
+Corre todas las funciones F1..F12 sobre los MaxFES configurados, en modos
+`base` y `shap` con seeds pareadas, en segundo plano (nohup) sobreviviendo a
+desconexion SSH.
+
+Modo recomendado (flags largos):
+   ./run_remote_cec.sh [--runs N] [--dim N] [--agents N] [--budgets LISTA]
+
+Opciones:
+   -r, --runs N        Cantidad de corridas por (problema, MaxFES). Default: 5
+   -d, --dim N         Dimension del problema. Default: 10
+                       (el protocolo formal usa 10 y 20)
+   -a, --agents N      Tamano de poblacion. Default: 30
+   -b, --budgets LISTA Lista de MaxFES separados por coma.
+                       Default: 5000,50000,500000,5000000
+   -h, --help          Muestra la ayuda
+
+Ejemplos:
+
+   # Smoke rapido (5 runs sobre los 4 MaxFES; ~horas dependiendo del CPU):
+   ./run_remote_cec.sh
+
+   # Protocolo completo: 51 corridas (puede tomar dias en un solo nodo):
+   ./run_remote_cec.sh --runs 51
+
+   # Solo MaxFES bajos para iterar mas rapido:
+   ./run_remote_cec.sh --runs 5 --budgets "5000,50000"
+
+   # Dimension 20 con 10 runs:
+   ./run_remote_cec.sh --runs 10 --dim 20
+
+   # Modo posicional legacy (sigue funcionando):
+   ./run_remote_cec.sh 51 20
+
+Salida:
+   experiments/cec2022_d<DIM>_fes<MAXFES>/base/values/summary.csv
+   experiments/cec2022_d<DIM>_fes<MAXFES>/base/curves/conv_curve_F*_fes*_run*.csv
+   experiments/cec2022_d<DIM>_fes<MAXFES>/shap/values/summary.csv
+   experiments/cec2022_d<DIM>_fes<MAXFES>/shap/values/controller_events.csv
+   experiments/cec2022_d<DIM>_fes<MAXFES>/shap/values/controller_non_events.csv
+   experiments/cec2022_d<DIM>_fes<MAXFES>/shap/values/shap_values.csv
+   experiments/cec2022_d<DIM>_fes<MAXFES>/shap/curves/conv_curve_F*_fes*_run*.csv
+
+Log:
+   ablation_cec2022_d<DIM>_sweep.log    (en la raiz del repo)
+Seguir progreso:
+   tail -f ablation_cec2022_d<DIM>_sweep.log
+
+--------------------------------------------------------------------------------
+3. BARRIDO TMLAP DURA — `run_remote.sh`
+--------------------------------------------------------------------------------
+
+Corre `3.instancia_dura.txt` (la instancia mas dificil) en modos `base` y
+`shap` con seeds pareadas, en segundo plano (nohup).
+
+Modo recomendado (flags largos):
+   ./run_remote.sh [--runs N] [--max-fes N] [--output PATH]
+
+Opciones:
+   -r, --runs N         Cantidad de corridas. Default: 5
+   -f, --max-fes N      Presupuesto MaxFES. Default: 50000
+   -o, --output PATH    Directorio de salida.
+                        Default: experiments/ablation_b4_dura_<RUNS>
+   -h, --help           Muestra la ayuda
+
+Ejemplos:
+
+   # Smoke rapido:
+   ./run_remote.sh
+
+   # 10 corridas a 500k FES:
+   ./run_remote.sh --runs 10 --max-fes 500000
+
+   # Protocolo completo:
+   ./run_remote.sh --runs 51 --max-fes 500000
+
+   # Carpeta de salida personalizada:
+   ./run_remote.sh --runs 5 --output experiments/quick_test
+
+   # Modo posicional legacy:
+   ./run_remote.sh 10 500000
+
+Salida:
+   experiments/ablation_b4_dura_<RUNS>/base/values/summary.csv
+   experiments/ablation_b4_dura_<RUNS>/shap/values/summary.csv
+   (mismas subcarpetas curves/, controller_events.csv, etc. que CEC)
+
+Log:
+   ablation_ablation_b4_dura_<RUNS>.log    (en la raiz del repo)
+
+--------------------------------------------------------------------------------
+4. INVOCACION DIRECTA DEL RUNNER (sin shell script)
+--------------------------------------------------------------------------------
+
+Util para corridas one-off o debugging local.
+
+   python -m runners.run_ablation \\
+     --problem cec2022:F10 --dim 10 --agents 30 \\
+     --max-fes 500000 --runs 3 --modes base,shap \\
+     --output experiments/mi_prueba_F10
+
+Parametros principales del runner (`python -m runners.run_ablation --help`):
+   --problem        cec2022:Fx | cec2022:all | tmlap:<archivo>.txt
+   --dim N          Dimension (solo CEC). Default 10
+   --agents N       Tamano de poblacion. Default 30
+   --max-fes N      Presupuesto MaxFES (acepta lista separada por coma)
+   --runs N         Corridas por config. Default 51
+   --modes LISTA    base, shap o ambos separados por coma. Default: base,shap
+   --init-mode      local_search (TMLAP) o random. Default: local_search
+   --no-exact-optimum  No calcula optimo exacto (TMLAP dura/grande)
+   --output DIR     Directorio base de salida
+   --seed N         Semilla raiz (pareada base<->shap). Default 1234
+
+--------------------------------------------------------------------------------
+5. COLUMNAS DE summary.csv (modo base y shap)
+--------------------------------------------------------------------------------
+
+Comunes a ambos modos:
+   run_id, seed, algorithm, problem_spec, problem_family, problem,
+   dim, agents, max_fes,
+   initial_fitness, final_fitness, optimum, gap_to_optimum,
+   elapsed_seconds, t_init_seconds, t_shap_seconds,
+   stagnation_window, n_stagnant_at_end, mean_fes_since_improve_at_end,
+   max_fes_since_improve_at_end,
+   fes_init, fes_search, fes_shap, fes_intervention, fes_total,
+   best_position, init_mode
+
+Solo SHAP (en base quedan ausentes o como NaN):
+   controller_profile, interventions, shap_explanations, shapley_steps,
+   n_reinit_random, n_reinit_guided
+
+Sobre las columnas de estancamiento:
+   - stagnation_window = round(0.10 * MaxFES). Mismo umbral en ambos modos
+     para permitir comparacion pareada honesta (modo base solo DETECTA;
+     modo shap detecta + interviene).
+   - n_stagnant_at_end = cuantos agentes terminaron con fes_since_improve >=
+     stagnation_window al exhaustar MaxFES.
+   - mean/max_fes_since_improve_at_end = estadisticas de cuanto FES llevaba
+     cada agente sin mejorar al terminar.
+
+--------------------------------------------------------------------------------
+6. FLUJO RECOMENDADO PARA UNA SESION COMPLETA
+--------------------------------------------------------------------------------
+
+   # 1) Smoke local antes de subir al servidor (~6 min):
+   python -m runners.run_ablation \\
+     --problem cec2022:F10 --dim 10 --agents 30 \\
+     --max-fes 500000 --runs 3 --modes base,shap \\
+     --output experiments/_smoke_F10
+
+   # 2) Verificar que todos los gaps son > 0:
+   python -c "
+   import pandas as pd
+   b = pd.read_csv('experiments/_smoke_F10/base/values/summary.csv')
+   s = pd.read_csv('experiments/_smoke_F10/shap/values/summary.csv')
+   assert (b['gap_to_optimum'] > 0).all() and (s['gap_to_optimum'] > 0).all()
+   print('OK')
+   "
+
+   # 3) En servidor: lanzar barrido completo CEC en background:
+   ./run_remote_cec.sh --runs 51
+
+   # 4) En paralelo (otro nodo o sesion): TMLAP dura:
+   ./run_remote.sh --runs 51 --max-fes 50000
+   ./run_remote.sh --runs 51 --max-fes 500000
+
+   # 5) Seguir progreso:
+   tail -f ablation_cec2022_d10_sweep.log
+
+   # 6) Analisis (cuando termine):
+   python -m analysis.report_html \\
+     --input experiments/cec2022_d10_fes500000 \\
+     --output reporte_d10_500k.html
+
+--------------------------------------------------------------------------------
+7. TROUBLESHOOTING
+--------------------------------------------------------------------------------
+
+- "ERROR: falta la libreria 'opfunu'": `pip install opfunu`
+- "ERROR: ejecuta este script desde la raiz del repo": `cd` a la carpeta que
+  contiene `runners/`, `wo_core/`, las instancias TMLAP, etc.
+- Final_fitness negativo o NaN en composition functions (F9..F12): NO deberia
+  pasar con el codigo actual (triple clipping). Si ocurre, revisar que el
+  runner que se este ejecutando sea `runners/run_ablation.py` y no un script
+  legacy de `experiments/ablation_b4/` (que fue borrado en mayo 2026).
+- Wall-clock muy largo: el cuello de botella es MaxFES=5e6. Para iterar
+  rapido, usar `--budgets "5000,50000"` y validar antes de lanzar 5e6.

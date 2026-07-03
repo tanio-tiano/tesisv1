@@ -1,2 +1,0 @@
-run_id,benchmark,benchmark_source,algorithm,gbest_mode,function,function_id,function_name,function_family,dim,agents,iterations,seed,initial_fitness,final_fitness,optimum,gap_to_optimum,best_position,curve_csv,status
-4,cec2022,opfunu,WO_base,legacy,F2,2,Shifted and Rotated Rosenbrock’s Function,basic,10,30,500,4235,8238.773657473732,408.92849479002075,400.0,8.92849479002075,27.0415498759 56.102468407 -100 100 46.7067409662 6.47687311193 84.7516213922 68.752456005 -28.4845699431 71.5723223434,all_functions_outputs_30runs_legacy_20260429\values\conv_curve_F2_run4.csv,completed

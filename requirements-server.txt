@@ -1,0 +1,7 @@
+# Versiones relajadas para servidores con Python < 3.11
+# (los pines exactos de requirements.txt necesitan Python >= 3.11).
+# Usar solo si 'pip install -r requirements.txt' falla por versiones.
+numpy>=2.0
+pandas>=2.2
+scipy>=1.11
+opfunu>=1.0.4
