@@ -113,7 +113,7 @@ Salida estructurada por modo: `experiments/<config>/{base,shap}/values/` + `/cur
 
 | Archivo | Modo | Contenido | Sirve para |
 |---|---|---|---|
-| `summary.csv` | base, shap | por corrida: `final_fitness`, `gap_to_optimum`, `interventions`, `shap_explanations`, `t_init_seconds`, `t_shap_seconds`, telemetría de estancamiento (`stagnation_window`, `n_stagnant_at_end`, `mean/max_fes_since_improve_at_end`), `n_reinit_random`, `n_reinit_guided`, buckets de FES | calidad y **costo computacional** |
+| `summary.csv` | base, shap | por corrida: `final_fitness`, `gap_to_optimum`, `interventions`, `shap_explanations`, `t_init_seconds`, `t_shap_seconds`, telemetría de estancamiento (`stagnation_window`, **`n_stagnation_episodes`** — transiciones no-estancado→estancado durante la corrida, comparable base vs shap —, `n_stagnant_at_end`, `mean/max_fes_since_improve_at_end`), `n_reinit_random`, `n_reinit_guided`, buckets de FES | calidad y **costo computacional** |
 | `curves/conv_curve_F<n>_fes<M>_run<r>.csv` | base, shap | `fes, best_fitness` | **convergencia** (best vs FES) |
 | `controller_events.csv` | shap | una fila por intervención (acción, rama, `dominant_share`, `improved`, cooldowns, `shap_dominant_feature`) | trazabilidad de la actuación |
 | `controller_non_events.csv` | shap | candidatos bloqueados por una compuerta (motivo) | por qué NO se intervino |

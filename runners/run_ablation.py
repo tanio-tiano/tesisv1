@@ -164,6 +164,9 @@ def _make_problems(args):
     if args.problem.startswith("tmlap:"):
         problem = parse_problem_spec(args.problem, clients=args.clients, hubs=args.hubs)
         return [(problem, problem.name)]
+    if args.problem.startswith("mlpap:"):
+        problem = parse_problem_spec(args.problem)
+        return [(problem, problem.name)]
     raise ValueError(f"Familia desconocida: {args.problem!r}")
 
 
@@ -213,6 +216,10 @@ def run_one_base(problem, args, max_fes, max_fes_idx, run_id, problem_idx, probl
     stagnation_window = max(1, int(round(STAGNATION_WINDOW_FRACTION * max_fes)))
     pbest = np.full(n_agents, np.inf, dtype=float)
     last_improve_fes = np.zeros(n_agents, dtype=np.int64)
+    # Episodios de estancamiento: cuenta transiciones no-estancado -> estancado
+    # (variable de respuesta declarada en la tesis, comparable base vs shap).
+    was_stagnant = np.zeros(n_agents, dtype=bool)
+    n_stagnation_episodes = 0
 
     while not budget.exhausted():
         fes_start = budget.total
@@ -237,6 +244,10 @@ def run_one_base(problem, args, max_fes, max_fes_idx, run_id, problem_idx, probl
             elif f < pbest[i] - improvement_threshold(pbest[i]):
                 pbest[i] = f
                 last_improve_fes[i] = budget.total
+
+        now_stagnant = (budget.total - last_improve_fes) >= stagnation_window
+        n_stagnation_episodes += int(np.sum(now_stagnant & ~was_stagnant))
+        was_stagnant = now_stagnant
 
         curve.append((int(budget.total), float(best_score)))
         if budget.exhausted():
@@ -288,6 +299,7 @@ def run_one_base(problem, args, max_fes, max_fes_idx, run_id, problem_idx, probl
         "t_init_seconds": float(t_init_seconds),
         "t_shap_seconds": float("nan"),
         "stagnation_window": int(stagnation_window),
+        "n_stagnation_episodes": int(n_stagnation_episodes),
         "n_stagnant_at_end": int(n_stagnant_at_end),
         "mean_fes_since_improve_at_end": float(mean_fes_since),
         "max_fes_since_improve_at_end": int(max_fes_since),
@@ -329,6 +341,10 @@ def run_one_shap(problem, args, max_fes, max_fes_idx, run_id, problem_idx, probl
 
     pbest = np.full(n_agents, np.inf, dtype=float)
     last_improve_fes = np.zeros(n_agents, dtype=np.int64)
+    # Episodios de estancamiento: transiciones no-estancado -> estancado
+    # (simetrico con el modo base para comparacion pareada).
+    was_stagnant = np.zeros(n_agents, dtype=bool)
+    n_stagnation_episodes = 0
     diversity_ref = None
     curve = []
     initial_fitness = np.nan
@@ -358,6 +374,10 @@ def run_one_shap(problem, args, max_fes, max_fes_idx, run_id, problem_idx, probl
             elif f < pbest[i] - improvement_threshold(pbest[i]):
                 pbest[i] = f
                 last_improve_fes[i] = budget.total
+
+        now_stagnant = (budget.total - last_improve_fes) >= window
+        n_stagnation_episodes += int(np.sum(now_stagnant & ~was_stagnant))
+        was_stagnant = now_stagnant
 
         curve.append((int(budget.total), float(best_score)))
         if budget.exhausted():
@@ -514,6 +534,7 @@ def run_one_shap(problem, args, max_fes, max_fes_idx, run_id, problem_idx, probl
         "t_init_seconds": float(t_init_seconds),
         "t_shap_seconds": float(t_shap_seconds),
         "stagnation_window": int(window),
+        "n_stagnation_episodes": int(n_stagnation_episodes),
         "n_stagnant_at_end": int(n_stagnant_at_end),
         "mean_fes_since_improve_at_end": float(mean_fes_since),
         "max_fes_since_improve_at_end": int(max_fes_since),
